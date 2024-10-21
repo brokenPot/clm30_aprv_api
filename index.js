@@ -92,7 +92,6 @@ app.post('/test/insertDefault',  (req, res) => {
 	// PostgreSQL 쿼리 실행
 	 postgresql.query(insertDefaultQuery, (err, result) => {
 		if (err) {
-			console.log(err);
 			res.status(500).send('Error occurred while inserting into the database.');
 		} else {
 			res.status(201).send({ message: 'Data inserted and updated successfully.' })
@@ -117,17 +116,27 @@ app.delete('/test/deleteDefault/:def_id', async (req, res) => {
 		res.status(500).send('Error occurred while deleting from the database.');
 	}
 });
-
 const deleteDefaultFromDatabase = async (def_id) => {
+	// 먼저 scc_aprv_default_group 테이블에서 연결된 데이터를 삭제
+	const deleteGroupQuery = {
+		text: `DELETE FROM scc_aprv_default_group WHERE def_id = $1`,
+		values: [def_id],
+	};
+
+	// 그 후 scc_aprv_default 테이블에서 데이터를 삭제
 	const deleteDefaultQuery = {
 		text: `DELETE FROM scc_aprv_default WHERE def_id = $1`,
 		values: [def_id],
 	};
 
 	return new Promise((resolve, reject) => {
-		postgresql.query(deleteDefaultQuery, (err, result) => {
+		postgresql.query(deleteGroupQuery, (err, result) => {
 			if (err) return reject(err);
-			resolve(result);
+
+			postgresql.query(deleteDefaultQuery, (err, result) => {
+				if (err) return reject(err);
+				resolve(result);
+			});
 		});
 	});
 };
@@ -165,6 +174,118 @@ app.post('/test/updateAprv/:def_id',  (req, res) => {
 });
 
 // 결재선 내 결제 그룹만 수정 및 저장
+// app.post('/test/updateGroup/:def_id', async (req, res) => {
+// 	const { def_id } = req.params; // URL에서 def_id 추출
+// 	const { gojs_data, line_depth } = req.body; // 요청 본문에서 JSON 데이터 추출
+//
+// 	if (typeof gojs_data !== 'string') {
+// 		return res.status(400).json({ message: "gojs_data must be a string" });
+// 	}
+//
+// 	let converted_gojs_data;
+// 	try {
+// 		converted_gojs_data = JSON.parse(gojs_data); // 문자열을 객체로 변환
+// 	} catch (err) {
+// 		console.error("Invalid JSON format for gojs_data", err);
+// 		return res.status(400).json({ message: "Invalid JSON format for gojs_data" });
+// 	}
+//
+// 	const insertGroupQuery = `
+//     INSERT INTO scc_aprv_default_group
+//       (def_id, group_name, seq, aprv_user_type, aprv_group, aprv_user_query, auth_id, verify_query,
+//       aprv_skip, skip_query, return_seq, selected_group_id, verify_query_sql)
+//     VALUES
+//       ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+//     RETURNING *;
+//   `;
+//
+//
+// 	for (const node of converted_gojs_data.nodeDataArray) {
+// 		// 그룹 데이터 삽입
+// 		await insertNodeData(insertGroupQuery, node, def_id);
+//
+// 		// aprv_user_type이 0인 경우에 대한 처리
+// 		if (node.aprv_user_type === 0 && node.selectedapprovals && node.selectedapprovals.length > 0) {
+// 			for (const approval of node.selectedapprovals) {
+// 				const { name, seq, aprv_id, default_check} = approval;
+//
+// 				// 사용자 데이터 삽입 (user_id는 자동 생성되므로 제외)
+// 				await postgresql.query(insertUserQuery, [def_id, seq, aprv_id, default_check, '', name]);
+// 			}
+// 		}
+// 	}
+//
+//
+//
+//
+// 	const updateQuery = `
+//     UPDATE scc_aprv_default
+//     SET gojs_data = $2,
+//         line_depth = $3,
+//         update_dt = CURRENT_TIMESTAMP
+//     WHERE def_id = $1
+//     RETURNING *;
+//   `;
+//
+// 	const insertUserQuery = `
+//     INSERT INTO scc_aprv_default_user
+//       (def_id, seq, aprv_id, default_check, group_id, user_name)
+//     VALUES
+//       ($1, $2, $3, $4, $5, $6)
+//     RETURNING *;
+//   `;
+//
+// 	console.log(converted_gojs_data.nodeDataArray);
+//
+// 	try {
+// 		// 트랜잭션 시작
+// 		await postgresql.query('BEGIN');
+//
+// 		// scc_aprv_default 테이블 업데이트
+// 		const updateResult = await postgresql.query(updateQuery, [def_id, converted_gojs_data, line_depth]);
+//
+// 		if (updateResult.rowCount === 0) {
+// 			await postgresql.query('ROLLBACK');
+// 			return res.status(404).json({ message: 'No group found with the given def_id' });
+// 		}
+//
+// 		// 기존 데이터를 삭제한 후, 새 데이터를 삽입하는 로직으로 대체
+// 		await postgresql.query('DELETE FROM scc_aprv_default_group WHERE def_id = $1', [def_id]);
+// 		await postgresql.query('DELETE FROM scc_aprv_default_user WHERE def_id = $1', [def_id]); // 사용자 데이터 삭제
+//
+// 		for (const node of converted_gojs_data.nodeDataArray) {
+// 			// 그룹 데이터 삽입
+// 			await insertNodeData(insertGroupQuery, node, def_id);
+//
+// 			// aprv_user_type이 0인 경우에 대한 처리
+// 			if (node.aprv_user_type === 0 && node.selectedapprovals && node.selectedapprovals.length > 0) {
+// 				for (const approval of node.selectedapprovals) {
+// 					const { name, seq, aprv_id, default_check, group_id } = approval;
+//
+// 					// 사용자 데이터 삽입 (user_id는 자동 생성되므로 제외)
+// 					await postgresql.query(insertUserQuery, [def_id, seq, aprv_id, default_check, group_id, name]);
+// 				}
+// 			}
+// 		}
+//
+// 		// 트랜잭션 커밋
+// 		await postgresql.query('COMMIT');
+//
+// 		res.status(200).json({
+// 			message: 'Group data successfully updated and inserted',
+// 			data: updateResult.rows[0],
+// 		});
+//
+// 	} catch (err) {
+// 		// 에러 발생 시 트랜잭션 롤백
+// 		await postgresql.query('ROLLBACK');
+// 		console.error('Error during transaction', err);
+// 		res.status(500).json({
+// 			message: 'Server error while updating or inserting group data',
+// 			error: err.message,
+// 		});
+// 	}
+// });
 app.post('/test/updateGroup/:def_id', async (req, res) => {
 	const { def_id } = req.params; // URL에서 def_id 추출
 	const { gojs_data, line_depth } = req.body; // 요청 본문에서 JSON 데이터 추출
@@ -187,6 +308,14 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
       aprv_skip, skip_query, return_seq, selected_group_id, verify_query_sql)
     VALUES
       ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    RETURNING group_id;
+  `;
+
+	const insertUserQuery = `
+    INSERT INTO scc_aprv_default_user
+      (def_id, seq, aprv_id, default_check, group_id, user_name)
+    VALUES
+      ($1, $2, $3, $4, $5, $6)
     RETURNING *;
   `;
 
@@ -198,16 +327,6 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
     WHERE def_id = $1
     RETURNING *;
   `;
-
-	const insertUserQuery = `
-    INSERT INTO scc_aprv_default_user
-      (def_id, seq, aprv_id, default_check, group_id, user_name)
-    VALUES
-      ($1, $2, $3, $4, $5, $6)
-    RETURNING *;
-  `;
-
-	console.log(converted_gojs_data.nodeDataArray);
 
 	try {
 		// 트랜잭션 시작
@@ -227,7 +346,23 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
 
 		for (const node of converted_gojs_data.nodeDataArray) {
 			// 그룹 데이터 삽입
-			await insertNodeData(insertGroupQuery, node, def_id);
+			const groupInsertResult = await postgresql.query(insertGroupQuery, [
+				def_id,
+				node.group_name,
+				node.seq,
+				node.aprv_user_type,
+				node.aprv_group,
+				node.aprv_user_query,
+				node.auth_id,
+				node.verify_query,
+				node.aprv_skip,
+				node.skip_query,
+				node.return_seq,
+				node.selected_group_id,
+				node.verify_query_sql
+			]);
+
+			const group_id = groupInsertResult.rows[0].group_id;
 
 			// aprv_user_type이 0인 경우에 대한 처리
 			if (node.aprv_user_type === 0 && node.selectedapprovals && node.selectedapprovals.length > 0) {
@@ -235,7 +370,7 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
 					const { name, seq, aprv_id, default_check } = approval;
 
 					// 사용자 데이터 삽입 (user_id는 자동 생성되므로 제외)
-					await postgresql.query(insertUserQuery, [def_id, seq, aprv_id, default_check, def_id, name]);
+					await postgresql.query(insertUserQuery, [def_id, seq, aprv_id, default_check, group_id, name]);
 				}
 			}
 		}
@@ -299,3 +434,187 @@ app.post('/test/checkRangeGroup', (req, res) => {
 		}
 	});
 });
+
+app.post('/test/insertProcess', (req, res) => {
+	console.log(req.body);
+	const { title, info, input_id, aprv_id, aprv_line_depth, def_id, group_seq, group_auth_id, aprv_user_type } = req.body;
+
+	const insertProcessQuery = `
+		INSERT INTO scc_aprv_process (
+			title, info, status, del_flag, input_id, input_dt, module_name, status_dt, cancel_opinion, confirm_dt
+		) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP)
+			RETURNING mis_id;
+	`;
+
+	postgresql.query('BEGIN', (err) => {
+		if (err) {
+			console.error('Transaction BEGIN error:', err);
+			return res.status(500).send('Transaction failed.');
+		}
+
+		console.log('쿼리 시작');
+		postgresql.query(insertProcessQuery, [title, info, 0, 0, input_id], (err, result) => {
+			if (err) {
+				console.error('Error inserting into scc_aprv_process:', err);
+				return res.status(500).send('Error occurred while inserting into the database.');
+			}
+
+			const mis_id = result.rows[0].mis_id;
+
+			const insertRoutePromises = [];
+
+			console.log("aprv_line_depth : ", aprv_line_depth);
+
+			for (let i = 0; i < aprv_line_depth; i++) {
+				const seq = i + 1;
+				const aprvIdValue = i === 0 ? aprv_id : '';
+
+				const insertRouteQuery = `
+                    INSERT INTO scc_aprv_route (
+                        mis_id, seq, activity, activity_dt, aprv_id, opinion, delegated, delegator,
+                        necessary, default_seq, alarm_send_result, auth_id, verify_query, read_dt,
+                        aprv_user_type, aprv_user_list, aprv_user_query, skip_check, skip_query, return_seq
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, '', null, $12, '', '', null, '', null);
+                `;
+
+				insertRoutePromises.push(
+					postgresql.query(insertRouteQuery, [
+						mis_id, seq, 0, null, aprvIdValue, '', 0, null, 0, seq, group_auth_id, aprv_user_type
+					])
+				);
+			}
+
+			Promise.all(insertRoutePromises)
+				.then(() => {
+					postgresql.query('COMMIT', (commitErr) => {
+						if (commitErr) {
+							console.error('Transaction COMMIT error:', commitErr);
+							return res.status(500).send('Transaction commit failed.');
+						}
+						res.status(201).send({ message: 'Data inserted successfully', mis_id });
+					});
+				})
+				.catch((err) => {
+					console.error('Error inserting into scc_aprv_route:', err);
+					postgresql.query('ROLLBACK', (rollbackErr) => {
+						if (rollbackErr) {
+							console.error('Transaction ROLLBACK error:', rollbackErr);
+						}
+					});
+					return res.status(500).send('Error occurred while inserting into the route table.');
+				});
+		});
+	});
+});
+
+
+// 결재선에 속한 그룹 하나 가져오기
+// app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
+// 	const uid = req.params.uid; // URL 파라미터로부터 uid를 가져옵니다.
+//
+// 	// 첫 번째 쿼리 작성 (scc_aprv_default 테이블 조회)
+// 	const query1 = {
+// 		text: `
+//       SELECT *
+//       FROM scc_aprv_default
+//       WHERE range_group = (
+//         SELECT gid
+//         FROM scc_user_groups
+//         WHERE uid = $1
+//         LIMIT 1
+//       )`,
+// 		values: [uid], // 첫 번째 파라미터로 uid 값을 넣습니다.
+// 	};
+//
+// 	try {
+// 		// 첫 번째 쿼리 실행
+// 		const data1 = await postgresql.query(query1);
+//
+// 		// 데이터가 없을 경우 404 응답
+// 		if (data1.rows.length === 0) {
+// 			return res.status(404).send("Approval line not found.");
+// 		}
+//
+//
+// 		const defId = data1.rows[0].def_id; // 첫 번째 쿼리에서 가져온 def_id 사용
+// 		const query2 = {
+// 			text: `
+//         SELECT *
+//         FROM scc_aprv_default_user
+//         WHERE def_id = $1 AND seq = 1`,
+// 			values: [defId], // 첫 번째 쿼리 결과에서 얻은 def_id 값을 사용
+// 		};
+// 		console.log(data1)
+// 		// 두 번째 쿼리 실행
+// 		const data2 = await postgresql.query(query2);
+//
+//
+//
+// 		// 두 번째 쿼리의 결과와 첫 번째 쿼리의 결과를 함께 반환
+// 		res.send({
+// 			aprv_data:data1.rows,
+// 			approvals:data2.rows
+// 	});
+//
+// 	} catch (err) {
+// 		console.error(err);
+// 		res.status(500).send("Error occurred while fetching approval line.");
+// 	}
+// });
+app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
+	const uid = req.params.uid; // URL 파라미터로부터 uid를 가져옵니다.
+
+	// 첫 번째 쿼리 작성 (scc_aprv_default 테이블 조회)
+	const query1 = {
+		text: `
+            SELECT * 
+            FROM scc_aprv_default 
+            WHERE range_group = (
+                SELECT gid 
+                FROM scc_user_groups
+                WHERE uid = $1 
+                LIMIT 1
+            )`,
+		values: [uid], // 첫 번째 파라미터로 uid 값을 넣습니다.
+	};
+
+	try {
+		// 첫 번째 쿼리 실행
+		const data1 = await postgresql.query(query1);
+
+		// 데이터가 없을 경우 404 응답
+		if (data1.rows.length === 0) {
+			return res.status(404).send("Approval line not found.");
+		}
+
+		const defId = data1.rows[0].def_id; // 첫 번째 쿼리에서 가져온 def_id 사용
+		const query2 = {
+			text: `SELECT
+					   u.aprv_id, u.user_name, u.seq, u.user_id,
+					   g.group_name, g.aprv_user_type,g.auth_id, g.skip_query,g.return_seq
+				   FROM
+					   scc_aprv_default_user u
+						   JOIN
+					   scc_aprv_default_group g
+					   ON
+						   u.group_id = g.group_id WHERE u.def_id = $1 AND u.seq = 1`,
+			values: [defId], // 첫 번째 쿼리 결과에서 얻은 def_id 값을 사용
+		};
+
+
+		// 두 번째 쿼리 실행
+		const data2 = await postgresql.query(query2);
+
+		// 두 번째 쿼리의 결과와 첫 번째 쿼리의 결과를 함께 반환
+		res.send({
+			aprv_data: data1.rows,
+			approvals: data2.rows
+		});
+
+	} catch (err) {
+		console.error(err);
+		res.status(500).send("Error occurred while fetching approval line.");
+	}
+});
+
+
