@@ -62,3 +62,18 @@
         // });
 //     }
 // });
+
+
+// 노드 데이터 삽입 함수
+// async function insertNodeData(insertQuery, node, def_id) {
+//     const {
+//         key, loc, seq, name, aprv_group, group_name, aprv_user_type, aprv_user_query,
+//         auth_id, verify_query, aprv_skip, skip_query, return_seq, selected_group_id, verify_query_sql, category
+//     } = node;
+//
+//     await postgresql.query(insertQuery, [
+//         def_id, group_name, seq, aprv_user_type, aprv_group, aprv_user_query, auth_id,
+//         verify_query, aprv_skip, skip_query, return_seq, selected_group_id, verify_query_sql,
+//         // key, loc, name, category
+//     ]);
+// }
