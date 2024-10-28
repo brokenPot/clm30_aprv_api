@@ -216,8 +216,6 @@ app.post('/test/updateConfirmDate', (req, res) => {
 		});
 	}
 });
-
-
 // 결재선 내 결제 그룹만 수정 및 저장
 app.post('/test/updateGroup/:def_id', async (req, res) => {
 	const { def_id } = req.params; // URL에서 def_id 추출
@@ -329,10 +327,6 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
 
 // 결재선 추가 및 수정 시 결재선과 결재 그룹 저장 및 수정 하는 api
 app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
-
-	console.log( req.params)
-	console.log( req.body)
-
 	const { def_id } = req.params; // URL에서 def_id 추출
 	const { line_name, range_group, gojs_data, line_depth,input_id } = req.body; // 요청 본문에서 각 컬럼 데이터 추출
 
@@ -654,6 +648,7 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 		res.status(500).send("Error occurred while fetching approval line.");
 	}
 });
+
 app.get('/test/aprvProcessExtractByInputAndStatus/:input_id/:status', async (req, res) => {
 	const inputId = req.params.input_id;
 	const status = req.params.status;
@@ -755,6 +750,7 @@ app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
 		res.status(500).send("Error occurred while fetching approval process and route.");
 	}
 });
+
 app.post('/test/aprvProcessAprvId', async (req, res) => {
 
 	const { user_id } = req.body;
@@ -795,51 +791,73 @@ app.post('/test/updateRoute', async (req, res) => {
 
 	// SQL 쿼리 1: 현재 라우트를 찾고 업데이트하는 쿼리
 	const findCurrentRouteQuery = `
-		SELECT * FROM scc_aprv_route
-		WHERE mis_id = $1 AND aprv_id = $2
-	`;
+        SELECT * FROM scc_aprv_route
+        WHERE mis_id = $1 AND aprv_id = $2
+    `;
 
 	// SQL 쿼리 2: 현재 라우트를 업데이트하는 쿼리 (activity, activity_dt 값 업데이트, opinion 포함)
 	const updateCurrentRouteQueryWithOpinion = `
-		UPDATE scc_aprv_route
-		SET activity = $1, opinion = $2, activity_dt = CURRENT_TIMESTAMP
-		WHERE mis_id = $3 AND aprv_id = $4
-			RETURNING *;
-	`;
+        UPDATE scc_aprv_route
+        SET activity = $1, opinion = $2, activity_dt = CURRENT_TIMESTAMP
+        WHERE mis_id = $3 AND aprv_id = $4
+        RETURNING *;
+    `;
 
 	const updateCurrentRouteQuery = `
-		UPDATE scc_aprv_route
-		SET activity = $1, activity_dt = CURRENT_TIMESTAMP
-		WHERE mis_id = $2 AND aprv_id = $3
-			RETURNING *;
-	`;
+        UPDATE scc_aprv_route
+        SET activity = $1, activity_dt = CURRENT_TIMESTAMP
+        WHERE mis_id = $2 AND aprv_id = $3
+        RETURNING *;
+    `;
 
 	// SQL 쿼리 3: 다음 라우터를 찾는 쿼리
 	const findNextRouteQuery = `
-		SELECT * FROM scc_aprv_route
-		WHERE mis_id = $1 AND seq = $2
-	`;
+        SELECT * FROM scc_aprv_route
+        WHERE mis_id = $1 AND seq = $2
+    `;
 
 	// SQL 쿼리 4: 다음 라우트를 업데이트하는 쿼리
 	const updateNextRouteQuery = `
-		UPDATE scc_aprv_route
-		SET activity = 1, aprv_id = $1
-		WHERE mis_id = $2 AND seq = $3
-			RETURNING *;
-	`;
+        UPDATE scc_aprv_route
+        SET activity = 1, aprv_id = $1
+        WHERE mis_id = $2 AND seq = $3
+        RETURNING *;
+    `;
 
 	// SQL 쿼리 5: scc_aprv_process 테이블에서 status_dt 업데이트
 	const updateProcessStatusQuery = `
-		UPDATE scc_aprv_process
-		SET status_dt = CURRENT_TIMESTAMP
-		WHERE mis_id = $1
-	`;
+        UPDATE scc_aprv_process
+        SET status_dt = CURRENT_TIMESTAMP
+        WHERE mis_id = $1
+    `;
 
 	// SQL 쿼리 6: scc_aprv_process 테이블의 cancel_opinion 칼럼 업데이트
 	const updateProcessCancelOpinionQuery = `
         UPDATE scc_aprv_process
         SET cancel_opinion = $1
         WHERE mis_id = $2
+    `;
+
+	// SQL 쿼리 7: scc_aprv_process 테이블의 status 값 업데이트
+	const updateProcessStatusValueQuery = `
+        UPDATE scc_aprv_process
+        SET status = $1, status_dt = CURRENT_TIMESTAMP
+        WHERE mis_id = $2
+    `;
+
+	// SQL 쿼리 8: 모든 route의 activity 상태 확인
+	const checkAllRoutesActivityQuery = `
+        SELECT COUNT(*)::INTEGER as total_routes, 
+               SUM(CASE WHEN activity = 3 THEN 1 ELSE 0 END)::INTEGER as completed_routes
+        FROM scc_aprv_route
+        WHERE mis_id = $1
+    `;
+
+	// SQL 쿼리 9: activity가 4인 row가 있는지 확인하는 쿼리
+	const checkActivity4ExistsQuery = `
+        SELECT COUNT(*)::INTEGER as count
+        FROM scc_aprv_route
+        WHERE mis_id = $1 AND activity = 4
     `;
 
 	try {
@@ -857,12 +875,33 @@ app.post('/test/updateRoute', async (req, res) => {
 
 			// scc_aprv_process 테이블의 cancel_opinion에 opinion 값 저장
 			await postgresql.query(updateProcessCancelOpinionQuery, [info, mis_id]);
+
+			// status 값을 3으로 업데이트 (activity가 4인 경우)
+			await postgresql.query(updateProcessStatusValueQuery, [3, mis_id]);
 		} else {
 			await postgresql.query(updateCurrentRouteQuery, [activity, mis_id, user_id]);
 		}
 
 		// scc_aprv_process 테이블의 status_dt 업데이트
 		await postgresql.query(updateProcessStatusQuery, [mis_id]);
+
+		// 모든 route의 상태 확인
+		const allRoutesStatus = await postgresql.query(checkAllRoutesActivityQuery, [mis_id]);
+		const { total_routes, completed_routes } = allRoutesStatus.rows[0];
+
+		// activity가 4인 row가 있는지 확인
+		const activity4Exists = await postgresql.query(checkActivity4ExistsQuery, [mis_id]);
+		const hasActivity4 = activity4Exists.rows[0].count > 0;
+
+		if (!hasActivity4) {
+			await postgresql.query(updateProcessStatusValueQuery, [1, mis_id]);
+		}
+
+		if (completed_routes === 1 && activity === 3) {
+			await postgresql.query(updateProcessStatusValueQuery, [1, mis_id]);
+		} else if (completed_routes === total_routes) {
+			await postgresql.query(updateProcessStatusValueQuery, [2, mis_id]);
+		}
 
 		// 다음 라우터 찾기
 		const nextRouteResult = await postgresql.query(findNextRouteQuery, [mis_id, seq + 1]);
