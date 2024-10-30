@@ -12,8 +12,7 @@ const postgresql = new Client({
 	port: 5433,
 });
 
-app.use(cors()); // cors 미들웨어를 삽입합니다.
-// cors 미들웨어를 삽입합니다.
+app.use(cors()); // cors 미들웨어
 app.use(express.json());
 
 const HOST = '127.0.0.1'; // 로컬 IP 기본값
@@ -39,107 +38,96 @@ app.get('/test/aprvDefault', async (req, res) => {
 	}
 });
 
-// 한가지 결재선 get
-app.get('/test/aprvDefault/:def_id',  (req, res) => {
-	const def_id = req.params.def_id; // URL 파라미터로부터 def_id를 가져옵니다.
-
-	const query = {
-		text: "SELECT * FROM scc_aprv_default SM WHERE SM.def_id = $1", // $1은 첫 번째 파라미터를 의미
-		values: [def_id], // 파라미터에 해당하는 값
-	};
-
-	try {
-		const data =  postgresql.query(query);
-
-		if (data.rows.length === 0) {
-			return res.status(404).send("Approval line not found.");
-		}
-
-		res.send(data.rows[0]); // 한 가지 결재선만 반환
-	} catch (err) {
-		console.log(err);
-		res.status(500).send("Error occurred while fetching approval line.");
-	}
-});
-
 // 결재선 추가
-app.post('/test/insertDefault',  (req, res) => {
-	const { line_name, range_group } = req.body;
-	const input_dt = new Date();
-	const input_id = 'system';  // 임시로 'system' 지정
+app.post('/test/insertProcess', (req, res) => {
+	const { title, info, input_id, aprv_id, aprv_line_depth, def_id, group_auth_id, aprv_user_type } = req.body;
 
-	// 첫 번째 쿼리: scc_aprv_default 테이블에 데이터 삽입
-	const insertDefaultQuery = {
-		text: `INSERT INTO scc_aprv_default (range_group, line_name, line_depth, input_dt, input_id, gojs_data)
-           VALUES ($1, $2, 0, $3, $4, $5) RETURNING def_id`,
-		values: [
-			range_group,
-			line_name,
-			input_dt,
-			input_id,
-			{
-				class: "GraphLinksModel",
-				modelData: {
-					canRelink: true
-				},
-				linkDataArray: [],
-				nodeDataArray: [],  // 이 단계에서는 빈 배열로 설정
-				linkKeyProperty: "key"
-			}
-		],
-	};
+	const insertProcessQuery = `
+		INSERT INTO scc_aprv_process (
+			title, info, status, del_flag, input_id, def_id, input_dt, module_name, status_dt, cancel_opinion, confirm_dt
+		) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP)
+			RETURNING mis_id;
+	`;
 
-	// PostgreSQL 쿼리 실행
-	 postgresql.query(insertDefaultQuery, (err, result) => {
+	postgresql.query('BEGIN', (err) => {
 		if (err) {
-			res.status(500).send('Error occurred while inserting into the database.');
-		} else {
-			res.status(201).send({ message: 'Data inserted and updated successfully.' })
+			console.error('Transaction BEGIN error:', err);
+			return res.status(500).send('Transaction failed.');
 		}
-	});
 
-	// select def_id from scc_aprv_de
-});
+		postgresql.query(insertProcessQuery, [title, info, 0, 0, input_id, def_id], (err, result) => {
+			if (err) {
+				console.error('Error inserting into scc_aprv_process:', err);
+				return res.status(500).send('Error occurred while inserting into the database.');
+			}
 
-// 결재선 삭제 리팩토링
-app.delete('/test/deleteDefault/:def_id', async (req, res) => {
-	const { def_id } = req.params;
+			const mis_id = result.rows[0].mis_id;
 
-	try {
-		const result = await deleteDefaultFromDatabase(def_id);
-		if (result.rowCount === 0) {
-			return res.status(404).send('No record found with the given def_id.');
-		}
-		res.status(200).send({ message: 'Data deleted successfully.' });
-	} catch (error) {
-		console.error(error);
-		res.status(500).send('Error occurred while deleting from the database.');
-	}
-});
-const deleteDefaultFromDatabase = async (def_id) => {
-	// 먼저 scc_aprv_default_group 테이블에서 연결된 데이터를 삭제
-	const deleteGroupQuery = {
-		text: `DELETE FROM scc_aprv_default_group WHERE def_id = $1`,
-		values: [def_id],
-	};
+			// Get the current max seq from scc_aprv_route
+			const getMaxSeqQuery = `SELECT COALESCE(MAX(seq), 0) as max_seq FROM scc_aprv_route WHERE mis_id = $1`;
 
-	// 그 후 scc_aprv_default 테이블에서 데이터를 삭제
-	const deleteDefaultQuery = {
-		text: `DELETE FROM scc_aprv_default WHERE def_id = $1`,
-		values: [def_id],
-	};
+			postgresql.query(getMaxSeqQuery, [mis_id], (err, result) => {
+				if (err) {
+					console.error('Error getting max seq:', err);
+					postgresql.query('ROLLBACK', (rollbackErr) => {
+						if (rollbackErr) {
+							console.error('Transaction ROLLBACK error:', rollbackErr);
+						}
+					});
+					return res.status(500).send('Error occurred while getting max seq.');
+				}
 
-	return new Promise((resolve, reject) => {
-		postgresql.query(deleteGroupQuery, (err, result) => {
-			if (err) return reject(err);
+				const maxSeq = result.rows[0].max_seq;
+				const insertRoutePromises = [];
 
-			postgresql.query(deleteDefaultQuery, (err, result) => {
-				if (err) return reject(err);
-				resolve(result);
+				for (let i = 0; i < aprv_line_depth; i++) {
+					const seq = maxSeq + i + 1;
+					const aprvIdValue = i === 0 ? aprv_id : '';
+
+					// seq가 1이면 activity는 1, 그 외에는 2
+					const activity = seq === maxSeq + 1 ? 1 : 2;
+
+					// 마지막 route에 대해 return_seq는 -1, 그 외에는 seq + 1
+					const return_seq = i === aprv_line_depth - 1 ? -1 : seq + 1;
+
+					const insertRouteQuery = `
+						INSERT INTO scc_aprv_route (
+							mis_id, seq, activity, activity_dt, aprv_id, opinion, delegated, delegator,
+							necessary, default_seq, alarm_send_result, auth_id, verify_query, read_dt,
+							aprv_user_type, aprv_user_list, aprv_user_query, skip_check, skip_query, return_seq
+						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, '', null, $12, '', '', null, '', $13);
+					`;
+
+					insertRoutePromises.push(
+						postgresql.query(insertRouteQuery, [
+							mis_id, seq, activity, null, aprvIdValue, '', 0, null, 0, seq, group_auth_id, aprv_user_type, return_seq
+						])
+					);
+				}
+
+				Promise.all(insertRoutePromises)
+					.then(() => {
+						postgresql.query('COMMIT', (commitErr) => {
+							if (commitErr) {
+								console.error('Transaction COMMIT error:', commitErr);
+								return res.status(500).send('Transaction commit failed.');
+							}
+							res.status(201).send({ message: 'Data inserted successfully', mis_id });
+						});
+					})
+					.catch((err) => {
+						console.error('Error inserting into scc_aprv_route:', err);
+						postgresql.query('ROLLBACK', (rollbackErr) => {
+							if (rollbackErr) {
+								console.error('Transaction ROLLBACK error:', rollbackErr);
+							}
+						});
+						return res.status(500).send('Error occurred while inserting into the route table.');
+					});
 			});
 		});
 	});
-};
+});
 
 // 결재선 내 결제 그룹 제외 수정 및 저장
 app.post('/test/updateAprv/:def_id',  (req, res) => {
@@ -158,7 +146,7 @@ app.post('/test/updateAprv/:def_id',  (req, res) => {
 
 	try {
 		// PostgreSQL에 데이터 업데이트
-		 postgresql.query(query, [def_id, line_name, range_group]);
+		postgresql.query(query, [def_id, line_name, range_group]);
 		// 업데이트된 그룹 ID 반환
 		res.status(200).json({
 			message: 'Group data successfully updated',
@@ -173,49 +161,6 @@ app.post('/test/updateAprv/:def_id',  (req, res) => {
 	}
 });
 
-// 결재선 컨펌 데이트 업데이트 api
-app.post('/test/updateConfirmDate', (req, res) => {
-	const { mis_id } = req.body; // 요청 본문에서 mis_id 추출
-
-	// SQL UPDATE 쿼리
-	const query = `
-    UPDATE scc_aprv_process
-    SET confirm_dt = CURRENT_TIMESTAMP
-    WHERE mis_id = $1
-    RETURNING mis_id;
-  `;
-
-	try {
-		// PostgreSQL에 데이터 업데이트
-		postgresql.query(query, [mis_id], (err, result) => {
-			if (err) {
-				console.error(err.message);
-				return res.status(500).json({
-					message: 'Server error while updating confirm date',
-					error: err.message
-				});
-			}
-
-			if (result.rowCount === 0) {
-				return res.status(404).json({
-					message: 'No record found with the provided mis_id'
-				});
-			}
-
-			// 업데이트된 mis_id 반환
-			res.status(200).json({
-				message: 'Confirm date successfully updated',
-				data: result.rows[0] // 반환된 결과의 첫 번째 row (mis_id 포함)
-			});
-		});
-	} catch (err) {
-		console.error(err.message);
-		res.status(500).json({
-			message: 'Server error while updating confirm date',
-			error: err.message
-		});
-	}
-});
 // 결재선 내 결제 그룹만 수정 및 저장
 app.post('/test/updateGroup/:def_id', async (req, res) => {
 	const { def_id } = req.params; // URL에서 def_id 추출
@@ -321,6 +266,50 @@ app.post('/test/updateGroup/:def_id', async (req, res) => {
 		res.status(500).json({
 			message: 'Server error while updating or inserting group data',
 			error: err.message,
+		});
+	}
+});
+
+// 결재선 컨펌 데이트 업데이트
+app.post('/test/updateConfirmDate', (req, res) => {
+	const { mis_id } = req.body; // 요청 본문에서 mis_id 추출
+
+	// SQL UPDATE 쿼리
+	const query = `
+    UPDATE scc_aprv_process
+    SET confirm_dt = CURRENT_TIMESTAMP
+    WHERE mis_id = $1
+    RETURNING mis_id;
+  `;
+
+	try {
+		// PostgreSQL에 데이터 업데이트
+		postgresql.query(query, [mis_id], (err, result) => {
+			if (err) {
+				console.error(err.message);
+				return res.status(500).json({
+					message: 'Server error while updating confirm date',
+					error: err.message
+				});
+			}
+
+			if (result.rowCount === 0) {
+				return res.status(404).json({
+					message: 'No record found with the provided mis_id'
+				});
+			}
+
+			// 업데이트된 mis_id 반환
+			res.status(200).json({
+				message: 'Confirm date successfully updated',
+				data: result.rows[0] // 반환된 결과의 첫 번째 row (mis_id 포함)
+			});
+		});
+	} catch (err) {
+		console.error(err.message);
+		res.status(500).json({
+			message: 'Server error while updating confirm date',
+			error: err.message
 		});
 	}
 });
@@ -438,10 +427,10 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
 	}
 });
 
-// 특정 range_group 중복 여부 확인 API 리팩토링
+// 특정 결재선의 range_group column 중복 여부 확인 API
 app.post('/test/checkRangeGroup', (req, res) => {
 	const { range_group, def_id } = req.body;
-		const query = {
+	const query = {
 		text: "SELECT COUNT(*) FROM scc_aprv_default WHERE range_group = $1 AND def_id != $2",
 		values: [range_group, def_id],
 	};
@@ -464,6 +453,48 @@ app.post('/test/checkRangeGroup', (req, res) => {
 	});
 });
 
+// 결재선 삭제
+app.delete('/test/deleteDefault/:def_id', async (req, res) => {
+	const { def_id } = req.params;
+
+	try {
+		const result = await deleteDefaultFromDatabase(def_id);
+		if (result.rowCount === 0) {
+			return res.status(404).send('No record found with the given def_id.');
+		}
+		res.status(200).send({ message: 'Data deleted successfully.' });
+	} catch (error) {
+		console.error(error);
+		res.status(500).send('Error occurred while deleting from the database.');
+	}
+});
+
+const deleteDefaultFromDatabase = async (def_id) => {
+	// 먼저 scc_aprv_default_group 테이블에서 연결된 데이터를 삭제
+	const deleteGroupQuery = {
+		text: `DELETE FROM scc_aprv_default_group WHERE def_id = $1`,
+		values: [def_id],
+	};
+
+	// 그 후 scc_aprv_default 테이블에서 데이터를 삭제
+	const deleteDefaultQuery = {
+		text: `DELETE FROM scc_aprv_default WHERE def_id = $1`,
+		values: [def_id],
+	};
+
+	return new Promise((resolve, reject) => {
+		postgresql.query(deleteGroupQuery, (err, result) => {
+			if (err) return reject(err);
+
+			postgresql.query(deleteDefaultQuery, (err, result) => {
+				if (err) return reject(err);
+				resolve(result);
+			});
+		});
+	});
+};
+
+// 결재 그룹 내 결재자 get api
 app.post('/test/checkUserBySeq', (req, res) => {
 	const { def_id, seq } = req.body;
 	const query = {
@@ -483,96 +514,8 @@ app.post('/test/checkUserBySeq', (req, res) => {
 	});
 });
 
-app.post('/test/insertProcess', (req, res) => {
-	const { title, info, input_id, aprv_id, aprv_line_depth, def_id, group_auth_id, aprv_user_type } = req.body;
 
-	const insertProcessQuery = `
-		INSERT INTO scc_aprv_process (
-			title, info, status, del_flag, input_id, def_id, input_dt, module_name, status_dt, cancel_opinion, confirm_dt
-		) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP)
-			RETURNING mis_id;
-	`;
-
-	postgresql.query('BEGIN', (err) => {
-		if (err) {
-			console.error('Transaction BEGIN error:', err);
-			return res.status(500).send('Transaction failed.');
-		}
-
-		postgresql.query(insertProcessQuery, [title, info, 0, 0, input_id, def_id], (err, result) => {
-			if (err) {
-				console.error('Error inserting into scc_aprv_process:', err);
-				return res.status(500).send('Error occurred while inserting into the database.');
-			}
-
-			const mis_id = result.rows[0].mis_id;
-
-			// Get the current max seq from scc_aprv_route
-			const getMaxSeqQuery = `SELECT COALESCE(MAX(seq), 0) as max_seq FROM scc_aprv_route WHERE mis_id = $1`;
-
-			postgresql.query(getMaxSeqQuery, [mis_id], (err, result) => {
-				if (err) {
-					console.error('Error getting max seq:', err);
-					postgresql.query('ROLLBACK', (rollbackErr) => {
-						if (rollbackErr) {
-							console.error('Transaction ROLLBACK error:', rollbackErr);
-						}
-					});
-					return res.status(500).send('Error occurred while getting max seq.');
-				}
-
-				const maxSeq = result.rows[0].max_seq;
-				const insertRoutePromises = [];
-
-				for (let i = 0; i < aprv_line_depth; i++) {
-					const seq = maxSeq + i + 1;
-					const aprvIdValue = i === 0 ? aprv_id : '';
-
-					// seq가 1이면 activity는 1, 그 외에는 2
-					const activity = seq === maxSeq + 1 ? 1 : 2;
-
-					// 마지막 route에 대해 return_seq는 -1, 그 외에는 seq + 1
-					const return_seq = i === aprv_line_depth - 1 ? -1 : seq + 1;
-
-					const insertRouteQuery = `
-						INSERT INTO scc_aprv_route (
-							mis_id, seq, activity, activity_dt, aprv_id, opinion, delegated, delegator,
-							necessary, default_seq, alarm_send_result, auth_id, verify_query, read_dt,
-							aprv_user_type, aprv_user_list, aprv_user_query, skip_check, skip_query, return_seq
-						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, '', null, $12, '', '', null, '', $13);
-					`;
-
-					insertRoutePromises.push(
-						postgresql.query(insertRouteQuery, [
-							mis_id, seq, activity, null, aprvIdValue, '', 0, null, 0, seq, group_auth_id, aprv_user_type, return_seq
-						])
-					);
-				}
-
-				Promise.all(insertRoutePromises)
-					.then(() => {
-						postgresql.query('COMMIT', (commitErr) => {
-							if (commitErr) {
-								console.error('Transaction COMMIT error:', commitErr);
-								return res.status(500).send('Transaction commit failed.');
-							}
-							res.status(201).send({ message: 'Data inserted successfully', mis_id });
-						});
-					})
-					.catch((err) => {
-						console.error('Error inserting into scc_aprv_route:', err);
-						postgresql.query('ROLLBACK', (rollbackErr) => {
-							if (rollbackErr) {
-								console.error('Transaction ROLLBACK error:', rollbackErr);
-							}
-						});
-						return res.status(500).send('Error occurred while inserting into the route table.');
-					});
-			});
-		});
-	});
-});
-
+// 로그인된 사용자 id로 생성된 결재선에서 결재선 정보와 결재선 내 한 그룹의 결재자 리스트 가져오는 api
 app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 	const uid = req.params.uid; // URL 파라미터로부터 uid를 가져옵니다.
 
@@ -649,6 +592,7 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 	}
 });
 
+// 로그인된 사용자 id와 결재선 상태로 결재선 가져오는 api
 app.get('/test/aprvProcessExtractByInputAndStatus/:input_id/:status', async (req, res) => {
 	const inputId = req.params.input_id;
 	const status = req.params.status;
@@ -683,16 +627,19 @@ app.get('/test/aprvProcessExtractByInputAndStatus/:input_id/:status', async (req
 	}
 });
 
+// 특정 mis_id의 라우트 가져오는 api
 app.get('/test/getApprovalRoute/:mis_id', async (req, res) => {
+
 	const mis_id = req.params.mis_id; // URL 파라미터로부터 mis_id를 가져옵니다.
 
-	// scc_aprv_route 테이블에서 mis_id를 조건으로 데이터를 조회하는 쿼리 작성
+	// scc_aprv_route 테이블에서 mis_id를 조건으로 데이터를 조회하고 seq 오름차순으로 정렬하는 쿼리 작성
 	const query = {
 		text: `
-            SELECT * 
-            FROM scc_aprv_route 
-            WHERE mis_id = $1
-        `,
+			SELECT *
+			FROM scc_aprv_route
+			WHERE mis_id = $1
+			ORDER BY seq ASC
+		`,
 		values: [mis_id], // 첫 번째 파라미터로 mis_id 값을 넣습니다.
 	};
 
@@ -719,58 +666,24 @@ app.get('/test/getApprovalRoute/:mis_id', async (req, res) => {
 // 결재 확인 (사용자가 결재할 요청 보는 화면)
 app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
 
-	const { user_id } = req.body;
+	const { user_id,status } = req.body;
 	const query = {
 		text: `
 			SELECT p.*, r.seq, r.activity
 			FROM scc_aprv_process p
 					 JOIN scc_aprv_route r ON p.mis_id = r.mis_id
-			WHERE r.aprv_id = $1;
+			WHERE r.aprv_id = $1 and p.status = $2;
 		`,
-		values: [user_id],
+		values: [user_id,status],
 	};
 
 	try {
-		const data = await postgresql.query(query,[user_id]);
+		const data = await postgresql.query(query,[user_id,status]);
 
 		// 데이터가 없을 경우 빈 배열 반환
 		if (data.rows.length === 0) {
 			return res.send({
-				res: []
-			});
-		}
-
-		// 쿼리 결과를 반환
-		res.send({
-			rows: data.rows
-		});
-
-	} catch (err) {
-		console.error(err);
-		res.status(500).send("Error occurred while fetching approval process and route.");
-	}
-});
-
-app.post('/test/aprvProcessAprvId', async (req, res) => {
-
-	const { user_id } = req.body;
-	const query = {
-		text: `
-			SELECT *
-			FROM scc_aprv_process p
-			ON p.mis_id = r.mis_id
-			WHERE r.aprv_id = $1
-		`,
-		values: [user_id],
-	};
-
-	try {
-		const data = await postgresql.query(query,[user_id]);
-
-		// 데이터가 없을 경우 빈 배열 반환
-		if (data.rows.length === 0) {
-			return res.send({
-				res: []
+				rows: []
 			});
 		}
 
@@ -795,18 +708,11 @@ app.post('/test/updateRoute', async (req, res) => {
         WHERE mis_id = $1 AND aprv_id = $2
     `;
 
-	// SQL 쿼리 2: 현재 라우트를 업데이트하는 쿼리 (activity, activity_dt 값 업데이트, opinion 포함)
-	const updateCurrentRouteQueryWithOpinion = `
+	// SQL 쿼리 2: 현재 라우트를 업데이트하는 쿼리 (activity, opinion, activity_dt 값 업데이트, )
+	const updateCurrentRouteQuery = `
         UPDATE scc_aprv_route
         SET activity = $1, opinion = $2, activity_dt = CURRENT_TIMESTAMP
         WHERE mis_id = $3 AND aprv_id = $4
-        RETURNING *;
-    `;
-
-	const updateCurrentRouteQuery = `
-        UPDATE scc_aprv_route
-        SET activity = $1, activity_dt = CURRENT_TIMESTAMP
-        WHERE mis_id = $2 AND aprv_id = $3
         RETURNING *;
     `;
 
@@ -870,8 +776,8 @@ app.post('/test/updateRoute', async (req, res) => {
 		}
 
 		if (activity === 4) {
-			// scc_aprv_route 테이블 업데이트 (opinion 포함)
-			await postgresql.query(updateCurrentRouteQueryWithOpinion, [activity, info, mis_id, user_id]);
+			// scc_aprv_route 테이블 업데이트
+			await postgresql.query(updateCurrentRouteQuery, [activity, info, mis_id, user_id]);
 
 			// scc_aprv_process 테이블의 cancel_opinion에 opinion 값 저장
 			await postgresql.query(updateProcessCancelOpinionQuery, [info, mis_id]);
@@ -879,7 +785,7 @@ app.post('/test/updateRoute', async (req, res) => {
 			// status 값을 3으로 업데이트 (activity가 4인 경우)
 			await postgresql.query(updateProcessStatusValueQuery, [3, mis_id]);
 		} else {
-			await postgresql.query(updateCurrentRouteQuery, [activity, mis_id, user_id]);
+			await postgresql.query(updateCurrentRouteQuery, [activity, info, mis_id, user_id]);
 		}
 
 		// scc_aprv_process 테이블의 status_dt 업데이트
