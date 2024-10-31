@@ -498,17 +498,16 @@ const deleteDefaultFromDatabase = async (def_id) => {
 app.post('/test/checkUserBySeq', (req, res) => {
 	const { def_id, seq } = req.body;
 	const query = {
-		text: "SELECT * FROM scc_aprv_default_user WHERE def_id = $1 AND seq = $2",
+		text: "SELECT du.*,  u.uname FROM scc_aprv_default_user du JOIN scc_user u ON du.aprv_id = u.uid  WHERE def_id = $1 AND seq = $2",
 		values: [def_id, seq],
 	};
 
 	const groupQuery = {
-		text: `SELECT ug.uid as aprv_id, udg.auth_id, udg.seq, udg.aprv_user_type, udg.skip_query, udg.return_seq
+		text: `SELECT ug.uid as aprv_id, udg.auth_id, udg.seq, udg.aprv_user_type,
+					  udg.skip_query, udg.return_seq, u.uname
 			   FROM scc_user_groups ug
-						JOIN
-					scc_aprv_default_group udg
-					ON
-						ug.gid = udg.aprv_group
+						JOIN scc_aprv_default_group udg ON ug.gid = udg.aprv_group
+						JOIN scc_user u ON ug.uid = u.uid
 			   WHERE udg.def_id = $1
 				 AND udg.seq = $2`,
 		values: [def_id, seq],
@@ -536,17 +535,6 @@ app.post('/test/checkUserBySeq', (req, res) => {
 // 로그인된 사용자 id로 생성된 결재선에서 결재선 정보와 결재선 내 한 그룹의 결재자 리스트 가져오는 api
 app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 	const uid = req.params.uid; // URL 파라미터로부터 uid를 가져옵니다.
-
-	// 로그인한 사용자가 본인이 생성한 결재선이 있는지 확인한다.
-	// const aprvLineSelectQuery = {
-	// 	text: `
-	// 		SELECT *
-	// 		FROM scc_aprv_default
-	// 		where input_id = $1 LIMIT 1
-	// 		`,
-	// 		values: [uid], // 첫 번째 파라미터로 uid 값을 넣습니다.
-	// };
-
 
 	// 로그인 사용자의 그룹 포함 여부에 따른 결재선 선택 쿼리 -> 다른 사용자가 만든 결재선을 선택하게 된다.
 	const aprvLineSelectQuery = {
@@ -592,15 +580,14 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 		// 첫번째 시퀀스의 결재 그룹의 타입이 0번인 경우
 		const aprvLineTypeAprvQuery = {
 			text: `SELECT
-					   u.aprv_id, u.user_name, u.seq, u.user_id,
-					   g.group_name, g.aprv_user_type, g.auth_id, g.skip_query, g.return_seq
-				   FROM
-					   scc_aprv_default_user u
-						   JOIN
-					   scc_aprv_default_group g
-					   ON
-						   u.group_id = g.group_id
-				   WHERE u.def_id = $1 AND u.seq = 1`,
+               u.aprv_id, u.user_name, u.seq, u.user_id,
+               g.group_name, g.aprv_user_type, g.auth_id, g.skip_query, g.return_seq,
+               su.uname
+           FROM
+               scc_aprv_default_user u
+               JOIN scc_aprv_default_group g ON u.group_id = g.group_id
+               JOIN scc_user su ON u.aprv_id = su.uid
+           WHERE u.def_id = $1 AND u.seq = 1`,
 			values: [aprvLineDefId], // 첫 번째 쿼리 결과에서 얻은 def_id 값을 사용
 		};
 
@@ -610,12 +597,11 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 		let approvals;
 		if (aprvLineTypeAprvData.rows.length === 0) {
 			const aprvLineTypeGroupQuery = {
-				text: `SELECT ug.uid as aprv_id, udg.auth_id, udg.seq,udg.aprv_user_type,udg.skip_query,udg.return_seq
+				text: `SELECT ug.uid as aprv_id, udg.auth_id, udg.seq, udg.aprv_user_type,
+							  udg.skip_query, udg.return_seq, u.uname
 					   FROM scc_user_groups ug
-								JOIN
-							scc_aprv_default_group udg
-							ON
-								ug.gid = udg.aprv_group
+								JOIN scc_aprv_default_group udg ON ug.gid = udg.aprv_group
+								JOIN scc_user u ON ug.uid = u.uid
 					   WHERE udg.def_id = $1
 						 AND udg.seq = 1`,
 				values: [aprvLineDefId] // 첫 번째 쿼리 결과에서 얻은 def_id 값을 사용
@@ -711,44 +697,42 @@ app.get('/test/getApprovalRoute/:mis_id', async (req, res) => {
 	}
 });
 
+// 특정 aprv_id, mis_id의 라우트 가져오는 api
+app.post('/test/getApprovalByAprvIdAndMisId', async (req, res)=> {
+	const {user_id, mis_id} = req.body;
+
+	const query = {
+		text: `
+ 			select r.seq, r.activity 
+ 			from scc_aprv_route r
+            WHERE r.aprv_id = $1 AND r.mis_id = $2 AND r.activity = 1
+		`,
+		values: [user_id, mis_id],
+	};
+
+	try {
+		const data = await postgresql.query(query);
+
+		// 데이터가 없을 경우 빈 배열 반환
+		if (data.rows.length === 0) {
+			return res.send({
+				rows: []
+			});
+		}
+
+		// 쿼리 결과를 반환
+		res.send({
+			rows: data.rows
+		});
+
+	} catch (err) {
+		console.error(err);
+		res.status(500).send("Error occurred while fetching approval process and route.");
+	}
+})
+
 // 결재 확인 (사용자가 결재할 요청 보는 화면)
-// app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
-//
-// 	const { user_id,status } = req.body;
-//
-//
-// 	// 사용자가 현재 결재해야 할 항목만 보여준다.
-// 	const query = {
-// 		text: `
-// 			SELECT p.*, r.seq, r.activity
-// 			FROM scc_aprv_process p
-// 					 JOIN scc_aprv_route r ON p.mis_id = r.mis_id
-// 			WHERE r.aprv_id = $1 and r.activity = 1  and p.status = $2;
-// 		`,
-// 		values: [user_id,status],
-// 	};
-//
-// 	try {
-// 		const data = await postgresql.query(query,[user_id,status]);
-//
-// 		// 데이터가 없을 경우 빈 배열 반환
-// 		if (data.rows.length === 0) {
-// 			return res.send({
-// 				rows: []
-// 			});
-// 		}
-//
-// 		// 쿼리 결과를 반환
-// 		res.send({
-// 			rows: data.rows
-// 		});
-//
-// 	} catch (err) {
-// 		console.error(err);
-// 		res.status(500).send("Error occurred while fetching approval process and route.");
-// 	}
-// });
-app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
+app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
 	const { user_id, status } = req.body;
 
 	// status 값에 따라 p.status와 r.activity 조건 설정
@@ -773,7 +757,7 @@ app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
 	// 쿼리 작성
 	const query = {
 		text: `
-            SELECT p.*, r.seq, r.activity
+            SELECT distinct p.*
             FROM scc_aprv_process p
             JOIN scc_aprv_route r ON p.mis_id = r.mis_id
             WHERE r.aprv_id = $1 
@@ -803,7 +787,6 @@ app.post('/test/aprvProcessExtractByActivityAndAprvId', async (req, res) => {
 		res.status(500).send("Error occurred while fetching approval process and route.");
 	}
 });
-
 
 // 결재 상세 확인 (사용자가 결재할 요청 보는 화면)
 app.post('/test/aprvProcessExtractByActivityAndAprvIdAndMisId', async (req, res) => {
