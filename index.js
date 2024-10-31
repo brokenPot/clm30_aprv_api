@@ -739,14 +739,19 @@ app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
 	let statusCondition;
 	let activityCondition;
 
-	if (status === 1) {
+	if (status === 0) { // 결재 예정
 		statusCondition = `(p.status = 0 OR p.status = 1)`;
 		activityCondition = `r.activity = 1`;
-	} else if (status === 2) {
+	}
+	else if (status === 1) { // 결재 진행 완료
+		statusCondition = `(p.status = 1)`;
+		activityCondition = `r.activity = 3`;
+	}
+	else if (status === 2) { // 전체 결재 완료
 		statusCondition = `p.status = 2`;
 		activityCondition = `r.activity = 3`;
 		// 결재자와 액티비티가 같은 row가 2개 이상 있는 경우로 인해 프로세스 중복해서 가져오는 오류 있음
-	} else if (status === 3) {
+	} else if (status === 3) {  // 결재 반려
 		statusCondition = `p.status = 3`;
 		activityCondition = `r.activity = 4`;
 		// 결재자와 액티비티가 같은 row가 2개 이상 있는 경우로 인해 프로세스 중복해서 가져오는 오류 있음
