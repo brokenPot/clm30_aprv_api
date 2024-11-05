@@ -40,7 +40,11 @@ app.get('/test/aprvDefault', async (req, res) => {
 
 // 결재선 추가
 app.post('/test/insertProcess', (req, res) => {
-	const { title, info, input_id, aprv_id, aprv_line_depth, def_id, group_auth_id, aprv_user_type } = req.body;
+	const { title, info, input_id, aprv_id, def_id, group_auth_id, aprv_user_type } = req.body;
+
+	const selectDefaultGroupByDefIdQuery = `
+		SELECT g.group_id, g.group_name, g.seq FROM scc_aprv_default_group g WHERE def_id = $1 ORDER BY seq ASC, group_id ASC
+	`;
 
 	const insertProcessQuery = `
 		INSERT INTO scc_aprv_process (
@@ -63,32 +67,25 @@ app.post('/test/insertProcess', (req, res) => {
 
 			const mis_id = result.rows[0].mis_id;
 
-			// Get the current max seq from scc_aprv_route
-			const getMaxSeqQuery = `SELECT COALESCE(MAX(seq), 0) as max_seq FROM scc_aprv_route WHERE mis_id = $1`;
-
-			postgresql.query(getMaxSeqQuery, [mis_id], (err, result) => {
+			postgresql.query(selectDefaultGroupByDefIdQuery, [def_id], (err, result) => {
 				if (err) {
-					console.error('Error getting max seq:', err);
+					console.error('Error selecting default group by def_id:', err);
 					postgresql.query('ROLLBACK', (rollbackErr) => {
 						if (rollbackErr) {
 							console.error('Transaction ROLLBACK error:', rollbackErr);
 						}
 					});
-					return res.status(500).send('Error occurred while getting max seq.');
+					return res.status(500).send('Error occurred while selecting default group.');
 				}
 
-				const maxSeq = result.rows[0].max_seq;
+				const groups = result.rows;
 				const insertRoutePromises = [];
 
-				for (let i = 0; i < aprv_line_depth; i++) {
-					const seq = maxSeq + i + 1;
-					const aprvIdValue = i === 0 ? aprv_id : '';
-
-					// seq가 1이면 activity는 1, 그 외에는 2
-					const activity = seq === maxSeq + 1 ? 1 : 2;
-
-					// 마지막 route에 대해 return_seq는 -1, 그 외에는 seq + 1
-					const return_seq = i === aprv_line_depth - 1 ? -1 : seq + 1;
+				groups.forEach((group, index) => {
+					const seq = group.seq;
+					const aprvIdValue = index === 0 ? aprv_id : '';
+					const activity = index === 0 ? 1 : 2;
+					const return_seq = index === groups.length - 1 ? -1 : group.seq+1;
 
 					const insertRouteQuery = `
 						INSERT INTO scc_aprv_route (
@@ -103,7 +100,7 @@ app.post('/test/insertProcess', (req, res) => {
 							mis_id, seq, activity, null, aprvIdValue, '', 0, null, 0, seq, group_auth_id, aprv_user_type, return_seq
 						])
 					);
-				}
+				});
 
 				Promise.all(insertRoutePromises)
 					.then(() => {
@@ -403,8 +400,11 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
 
 			if (node.aprv_user_type === 0 && node.selectedapprovals && node.selectedapprovals.length > 0) {
 				for (const approval of node.selectedapprovals) {
-					const { name, seq, aprv_id, default_check } = approval;
-					await postgresql.query(insertUserQuery, [defId, seq, aprv_id, default_check, group_id, name]);
+					const { name, aprv_id, default_check } = approval;
+					console.log(node)
+					console.log(approval)
+					// 노드 변경시 결재자의 seq도 바뀌기 위해 노드 시퀀스 삽입
+					await postgresql.query(insertUserQuery, [defId, node.seq, aprv_id, default_check, group_id, name]);
 				}
 			}
 		}
@@ -497,38 +497,47 @@ const deleteDefaultFromDatabase = async (def_id) => {
 // 결재 그룹 내 결재자 get api
 app.post('/test/checkUserBySeq', (req, res) => {
 	const { def_id, seq } = req.body;
-	const query = {
-		text: "SELECT du.*,  u.uname FROM scc_aprv_default_user du JOIN scc_user u ON du.aprv_id = u.uid  WHERE def_id = $1 AND seq = $2",
+
+	const aprvTypeQuery = {
+		text: "SELECT du.*, u.uname FROM scc_aprv_default_user du JOIN scc_user u ON du.aprv_id = u.uid WHERE def_id = $1 AND seq = $2",
 		values: [def_id, seq],
 	};
 
-	const groupQuery = {
+	const groupTypeQuery = {
 		text: `SELECT ug.uid as aprv_id, udg.auth_id, udg.seq, udg.aprv_user_type,
 					  udg.skip_query, udg.return_seq, u.uname
 			   FROM scc_user_groups ug
 						JOIN scc_aprv_default_group udg ON ug.gid = udg.aprv_group
 						JOIN scc_user u ON ug.uid = u.uid
-			   WHERE udg.def_id = $1
-				 AND udg.seq = $2`,
+			   WHERE udg.def_id = $1 AND udg.seq = $2`,
 		values: [def_id, seq],
 	};
 
-	// 결재 그룹 타입이 결재자인지 확인
-	postgresql.query(query, (err, data) => {
+	// 쿼리 타입 작업 예정 1
+	const queryTypeQuery = {
+		text: ``,
+		values: [def_id, seq],
+	};
+
+	postgresql.query(aprvTypeQuery, (err, aprvTypeData) => {
 		if (err) {
 			return res.status(500).json({ message: 'Error checking user by seq' });
-		} else if (data.rows.length === 0) {
-			// query 결과가 없다면 결재 그룹 타입이 그룹인지 확인
-			postgresql.query(groupQuery, (groupErr, groupData) => {
-				if (groupErr) {
-					return res.status(500).json({ message: 'Error checking group by seq' });
-				} else {
-					return res.status(200).json(groupData.rows.length === 0 ? { rows: [] } : groupData.rows);
-				}
-			});
-		} else {
-			return res.status(200).json(data.rows);
 		}
+
+		const aprvTypeNextAprv = aprvTypeData.rows.length > 0 ? aprvTypeData.rows : [];
+
+		postgresql.query(groupTypeQuery, (groupErr, groupTypeData) => {
+			if (groupErr) {
+				return res.status(500).json({ message: 'Error checking group by seq' });
+			}
+
+			const groupTypeNextAprv = groupTypeData.rows.length > 0 ? groupTypeData.rows : [];
+
+			return res.status(200).json({
+				aprvTypeNextAprv,
+				groupTypeNextAprv
+			});
+		});
 	});
 });
 
@@ -562,12 +571,10 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 	try {
 		// 첫 번째 쿼리 실행
 		let aprvLineData = await postgresql.query(aprvLineSelectQuery);
-		console.log("aprvLineData : ", aprvLineData.rows);
 
 		// 데이터가 없을 경우 AllAprvLineSelectQuery 실행
 		if (aprvLineData.rows.length === 0) {
 			aprvLineData = await postgresql.query(AllAprvLineSelectQuery);
-			console.log("AllAprvLineData : ", aprvLineData.rows);
 		}
 
 		// 여전히 데이터가 없을 경우 404 반환
@@ -593,7 +600,7 @@ app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
 
 		const aprvLineTypeAprvData = await postgresql.query(aprvLineTypeAprvQuery);
 
-		// query2의 결과가 없을 경우 groupQuery 실행
+		// aprvLineTypeAprvQuery의 결과가 없을 경우 groupQuery 실행
 		let approvals;
 		if (aprvLineTypeAprvData.rows.length === 0) {
 			const aprvLineTypeGroupQuery = {
