@@ -15,8 +15,8 @@ const postgresql = new Client({
 app.use(cors()); // cors 미들웨어
 app.use(express.json());
 
-const HOST = '127.0.0.1'; // 로컬 IP 기본값
-const PORT = 8080;
+const HOST = '192.168.10.104'; // 로컬 IP 기본값
+const PORT = 8081;
 
 //서버연결
 server.listen(PORT, HOST, ()=>{
@@ -633,10 +633,11 @@ app.get('/test/aprvProcessExtractByInputAndStatus/:input_id/:status', async (req
 
 	const query = {
 		text: `
-			SELECT *
-			FROM scc_aprv_process
-			WHERE input_id = $1 AND status = $2
-		`,
+        SELECT *
+        FROM scc_aprv_process
+        WHERE input_id = $1 
+        AND (status = $2 OR ($2 = 1 AND status IN (0, 1)))
+    `,
 		values: [inputId, status],
 	};
 
