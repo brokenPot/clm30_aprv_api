@@ -37,128 +37,226 @@ app.get('/test/aprvDefault', async (req, res) => {
         res.status(500).send('Internal Server Error');
     }
 });
+
 // 프로세스 추가
-app.post('/test/insertProcess', (req, res) => {
-    const { title, info, input_id, aprv_id, def_id, group_auth_id, aprv_user_type } = req.body;
+app.post('/test/insertProcess', async (req, res) => {
+    const { title, info, input_id, aprv_id, def_id } = req.body;
 
-    const selectDefaultGroupByDefIdQuery = `
-        SELECT g.group_name, g.ag_num, g.return_ag_num
-        FROM scc_aprv_default_group g
-        WHERE def_id = $1
-        ORDER BY CASE
-                     WHEN g.ag_num = (SELECT g_order.next_ag_num
-                                      FROM scc_aprv_default_group_order g_order
-                                      WHERE def_id = $1
-                                        AND ag_num = 0) THEN 0
-                     ELSE 1
-                 END,
-                 g.ag_num;
-    `;
+    const queries = {
+        insertProcess: `
+            INSERT INTO scc_aprv_process (title, info, status, del_flag, input_id, def_id, input_dt, module_name, status_dt,
+                                          cancel_opinion, confirm_dt)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP)
+            RETURNING mis_id;
+        `,
+        selectDefaultGroupByDefId: `
+           SELECT
+               g.ag_num,
+               g.return_ag_num,
+               g.aprv_user_type,
+               g.auth_id,
+               g.group_name,
+               g.verify_query,
+               g.skip_query,
+               g.aprv_user_query,
+               g.aprv_skip,
+               coalesce(g_order.next_ag_num, -1) as next_ag_num
+           FROM
+               scc_aprv_default_group g
+                   left JOIN
+               scc_aprv_default_group_order g_order
+               ON
+                   g.def_id = g_order.def_id AND g.ag_num = g_order.ag_num
+           WHERE
+               g.def_id = $1
+--            union all
+--            select 0,
+--            g.return_ag_num,
+--                g.aprv_user_type,
+--                g.auth_id,
+--                   g.group_name,
+--                g.verify_query,
+--                g.skip_query,
+--                g.aprv_user_query,
+--                g.aprv_skip,
+--                gdr.next_ag_num
+--            from scc_aprv_default_group_order gdr
+--            left outer join scc_aprv_default_group g
+--            on g.def_id = gdr.def_id
+--            and g.ag_num = gdr.next_ag_num
+--            where g.def_id = $1
+--            and gdr.ag_num = 0
+        `,
+        selectGroupOrderByDefIdAndAgNum: `
+            SELECT next_ag_num
+            FROM scc_aprv_default_group_order
+            WHERE def_id = $1 AND ag_num = $2;
+        `,
+        selectGroupNameByNextAgNum: `
+            SELECT group_name
+            FROM scc_aprv_default_group
+            WHERE ag_num = $1;
+        `,
+        insertRoute: `
+            INSERT INTO scc_aprv_route (
+                mis_id, ag_num, activity, activity_dt, aprv_id, opinion, delegated,
+                delegator, necessary, alarm_send_result, auth_id, aprv_user_type,
+                return_ag_num, next_ag_num, verify_query, aprv_user_query, skip_check, skip_query, aprv_user_list, group_name, read_dt, aprv_confirm
+            )
+            VALUES (
+                       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,$20, CURRENT_TIMESTAMP,0
+                   );
+        `,
+    };
 
-    const selectGroupOrderByDefIdAndAgNumQuery = `
-        SELECT next_ag_num
-        FROM scc_aprv_default_group_order
-        WHERE def_id = $1 AND ag_num = $2;
-    `;
+    try {
+        // 트랜잭션 시작
+        // 1. `scc_aprv_process`에 데이터 삽입
+        const { rows: processRows } = await postgresql.query(queries.insertProcess, [title, info, 0, 0, input_id, def_id]);
+        const mis_id = processRows[0].mis_id;
 
-    const insertProcessQuery = `
-        INSERT INTO scc_aprv_process (title, info, status, del_flag, input_id, def_id, input_dt, module_name, status_dt,
-                                      cancel_opinion, confirm_dt)
-        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, '', CURRENT_TIMESTAMP, '',
-                CURRENT_TIMESTAMP) RETURNING mis_id;
-    `;
+        // 2. 기본 그룹 조회
+        const { rows: formattedRouteDatas } = await postgresql.query(queries.selectDefaultGroupByDefId, [def_id]);
+        let first_ag_num = 0
 
-    postgresql.query('BEGIN', (err) => {
-        if (err) {
-            console.error('Transaction BEGIN error:', err);
-            return res.status(500).send('Transaction failed.');
-        }
+        // function removeInvalidRoutes(routeDatas) {
+        //     if (!Array.isArray(routeDatas)) {
+        //         throw new Error("Input must be an array");
+        //     }
+        //     let result = routeDatas.filter(route => route.ag_num === 0);
+        //     console.log(`1 : ${result[0]}`)
+        //     first_ag_num = result[0].next_ag_num
+        //     // 리턴한 라우트의 next_ag_num을 저기 저장해준다.
+        //     return routeDatas.filter(route => route.ag_num !== 0);
+        // }
 
-        postgresql.query(insertProcessQuery, [title, info, 0, 0, input_id, def_id], (err, result) => {
-            if (err) {
-                console.error('Error inserting into scc_aprv_process:', err);
-                return res.status(500).send('Error occurred while inserting into the database.');
+        const tempQuery = {
+            text: "select next_ag_num from scc_aprv_default_group_order where def_id = $1 and ag_num = 0",
+        };
+        const { rows: tempRows } = await postgresql.query(tempQuery, [def_id]);
+        first_ag_num=tempRows[0].next_ag_num
+
+        // const targetAgNum = formattedRouteDatas[0].ag_num
+        const cutOffData = formattedRouteDatas;
+        // const cutOffData = removeInvalidRoutes(formattedRouteDatas)
+        console.log(cutOffData)
+        // 3. 각 그룹에 대한 라우트 데이터 삽입
+        for (const [index, formattedRouteData] of cutOffData.entries()) {
+            const { ag_num, return_ag_num,aprv_user_type,auth_id,verify_query,skip_query,aprv_user_query,aprv_skip, next_ag_num} = formattedRouteData;
+            // 그룹 이름을 next_ag_num에 맞게 넣어줘야 한다.
+            // 263 - 1
+            // 264 - 2-1
+            // 265 - 2-2
+            // 266 - 3
+
+            console.log(first_ag_num)
+
+            const aprvIdValue = ag_num === first_ag_num ? aprv_id : null;
+            const activity = ag_num === first_ag_num ? 1 : 2;
+
+            // 한단계씩 밀려있기에 next_ag_num을 넣어준다.
+            // ag_num이 0인 경우, 아닌 경우
+            const aprvTypeQuery = {
+                text: "SELECT u.uid FROM scc_aprv_default_user du JOIN scc_user u ON du.aprv_id = u.uid WHERE def_id = $1 AND ag_num = $2",
+                values: [def_id, ag_num],
+            };
+
+            const groupTypeQuery = {
+                text: `SELECT u.uid
+                       FROM scc_user_groups ug
+                                JOIN scc_aprv_default_group udg ON ug.gid = udg.aprv_group
+                                JOIN scc_user u ON ug.uid = u.uid
+                       WHERE udg.def_id = $1
+                         AND udg.ag_num = $2`,
+                values: [def_id, ag_num],
+            };
+
+            const aprvLineTypeSqlQuery = {
+                text: `SELECT udg.auth_id,udg.aprv_user_query
+               FROM scc_aprv_default_group udg
+               WHERE udg.def_id = $1
+                 AND udg.ag_num = $2`,
+                values: [def_id, ag_num],
+            };
+            function extractUids(array) {
+                return array.map(item => item.uid).join(', ');
             }
 
-            const mis_id = result.rows[0].mis_id;
+            // 결재 그룹 타입 별로 aprv_user_list 칼럼에 결재자 넣어주기
+            // let aprvList = [];
+            if (aprv_user_type === 0){
+                const aprvTypeData = await postgresql.query(aprvTypeQuery);
+                const aprvTypeNextAprv = aprvTypeData.rows.length > 0
+                    ? aprvTypeData.rows.sort((a, b) => b.default_check - a.default_check)
+                    : [];
+                const aprvList=extractUids(aprvTypeNextAprv)
+                let groupName = '';
+                // if (next_ag_num !== -1) {
+                const { rows: groupNameRows } = await postgresql.query(queries.selectGroupNameByNextAgNum, [ag_num]);
+                groupName = groupNameRows.length > 0 ? groupNameRows[0].group_name : '';
+                // }
 
-            postgresql.query(selectDefaultGroupByDefIdQuery, [def_id], (err, result) => {
-                if (err) {
-                    console.error('Error selecting default group by def_id:', err);
-                    postgresql.query('ROLLBACK', (rollbackErr) => {
-                        if (rollbackErr) {
-                            console.error('Transaction ROLLBACK error:', rollbackErr);
-                        }
-                    });
-                    return res.status(500).send('Error occurred while selecting default group.');
+                // 라우트 삽입
+                await postgresql.query(queries.insertRoute, [
+                    mis_id, ag_num, activity, null, aprvIdValue, '', 0, null, 0, '', auth_id,
+                    aprv_user_type, return_ag_num, next_ag_num, verify_query, aprv_user_query, aprv_skip, skip_query, aprvList,groupName
+                ]);
+            }else if(aprv_user_type === 1){
+                console.log( "그룹 타입 1번 -> " , formattedRouteData)
+                const groupTypeData = await postgresql.query(groupTypeQuery);
+                // console.log(groupTypeData)
+                const groupTypeNextAprv = groupTypeData.rows.length > 0 ? groupTypeData.rows : [];
+                // console.log(groupTypeNextAprv)
+                const aprvList= extractUids(groupTypeNextAprv)
+                console.log(aprvList)
+                let groupName = '';
+                // if (next_ag_num !== -1) {
+                    const { rows: groupNameRows } = await postgresql.query(queries.selectGroupNameByNextAgNum, [ag_num]);
+                    groupName = groupNameRows.length > 0 ? groupNameRows[0].group_name : '';
+                // }
+                // 라우트 삽입
+                await postgresql.query(queries.insertRoute, [
+                    mis_id, ag_num, activity, null, aprvIdValue, '', 0, null, 0, '', auth_id,
+                    aprv_user_type, return_ag_num, next_ag_num, verify_query, aprv_user_query, aprv_skip, skip_query, aprvList,groupName
+                ]);
+            }else{
+                // aprv_user_type이 2일 때
+                const aprvLineTypeSqlQueryData = await postgresql.query(aprvLineTypeSqlQuery);
+                if (aprvLineTypeSqlQueryData.rows.length === 0 || !aprvLineTypeSqlQueryData.rows[0].aprv_user_query) {
+                    return res.status(400).json({ message: 'InvalidQuery' });
                 }
+                const selectedSqlQuery = {
+                    text: aprvLineTypeSqlQueryData.rows[0].aprv_user_query,
+                };
+                const selectedSqlQueryData = await postgresql.query(selectedSqlQuery);
+                const result =  selectedSqlQueryData.rows;
+                const aprvList=extractUids(result)
+                let groupName = '';
+                // if (next_ag_num !== -1) {
+                const { rows: groupNameRows } = await postgresql.query(queries.selectGroupNameByNextAgNum, [ag_num]);
+                groupName = groupNameRows.length > 0 ? groupNameRows[0].group_name : '';
+                // }
 
-                const groups = result.rows;
-                const insertRoutePromises = [];
+                // 라우트 삽입
+                await postgresql.query(queries.insertRoute, [
+                    mis_id, ag_num, activity, null, aprvIdValue, '', 0, null, 0, '', auth_id,
+                    aprv_user_type, return_ag_num, next_ag_num, verify_query, aprv_user_query, aprv_skip, skip_query, aprvList,groupName
+                ]);
+            }
 
-                groups.forEach((group, index) => {
-                    const ag_num = group.ag_num;
-                    const aprvIdValue = index === 0 ? aprv_id : '';
-                    const activity = index === 0 ? 1 : 2;
-                    const return_ag_num = group.return_ag_num;
 
-                    insertRoutePromises.push(
-                        new Promise((resolve, reject) => {
-                            postgresql.query(selectGroupOrderByDefIdAndAgNumQuery, [def_id, ag_num], (err, result) => {
-                                if (err) {
-                                    console.error('Error selecting next_ag_num:', err);
-                                    return reject(err);
-                                }
-                                const next_ag_num = result.rows.length > 0 ? result.rows[0].next_ag_num : -1;
 
-                                const insertRouteQuery = `
-                                    INSERT INTO scc_aprv_route (mis_id, ag_num, activity, activity_dt, aprv_id, opinion, delegated,
-                                                                delegator, necessary, alarm_send_result, auth_id, aprv_user_type,
-                                                                return_ag_num, next_ag_num, verify_query, read_dt,
-                                                                aprv_user_list, aprv_user_query, skip_check, skip_query)
-                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '', CURRENT_TIMESTAMP,
-                                            NULL, '', 0, '');
-                                `;
+        }
 
-                                postgresql.query(insertRouteQuery, [
-                                    mis_id, ag_num, activity, null, aprvIdValue, '', 0, null, 0, '', group_auth_id,
-                                    aprv_user_type, return_ag_num, next_ag_num
-                                ], (err) => {
-                                    if (err) {
-                                        console.error('Error inserting into scc_aprv_route:', err);
-                                        return reject(err);
-                                    }
-                                    resolve();
-                                });
-                            });
-                        })
-                    );
-                });
-
-                Promise.all(insertRoutePromises)
-                    .then(() => {
-                        postgresql.query('COMMIT', (commitErr) => {
-                            if (commitErr) {
-                                console.error('Transaction COMMIT error:', commitErr);
-                                return res.status(500).send('Transaction commit failed.');
-                            }
-                            res.status(201).send({ message: 'Data inserted successfully', mis_id });
-                        });
-                    })
-                    .catch((err) => {
-                        console.error('Error inserting into scc_aprv_route:', err);
-                        postgresql.query('ROLLBACK', (rollbackErr) => {
-                            if (rollbackErr) {
-                                console.error('Transaction ROLLBACK error:', rollbackErr);
-                            }
-                        });
-                        return res.status(500).send('Error occurred while inserting into the route table.');
-                    });
-            });
-        });
-    });
+        // 트랜잭션 커밋
+        await postgresql.query('COMMIT');
+        res.status(201).send({ message: 'Data inserted successfully', mis_id });
+    } catch (err) {
+        console.error('Error during transaction:', err);
+        await postgresql.query('ROLLBACK');
+        res.status(500).send('An error occurred during the transaction.');
+    }
 });
-
 // 결재선 내 결제 그룹 제외 수정 및 저장
 app.post('/test/updateAprv/:def_id', (req, res) => {
     const {def_id} = req.params; // URL에서 def_id 추출
@@ -327,7 +425,10 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
 
         const convertAgNumKeySet = {};
         const convertedGojsDataJson = JSON.parse(converted_gojs_data);
-
+        function removeString(input, target) {
+            const regex = new RegExp(target, 'g'); // target 문자열을 찾기 위한 정규 표현식
+            return input.replace(regex, ''); // target 문자열을 제거하고 남은 부분을 반환
+        }
         // 노드 및 사용자 처리
         const nodes = convertedGojsDataJson.nodeDataArray.slice(1);
         for (const node of nodes) {
@@ -336,7 +437,7 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
                 node.group_name,
                 node.aprv_user_type,
                 node.aprv_group,
-                node.aprv_user_query,
+                removeString(node.aprv_user_query, 'select uid, uname from scc_user'),
                 node.auth_id,
                 node.verify_query,
                 node.aprv_skip,
@@ -496,114 +597,6 @@ const deleteDefaultFromDatabase = async (def_id) => {
 };
 
 // 결재 그룹 내 결재자 get api
-// app.post('/test/checkUserByAgNum', (req, res) => {
-//     const {def_id, ag_num} = req.body;
-//
-//     // aprv_user_type을 가져오는 쿼리
-//     const queryTypeQuery = {
-//         text: `SELECT ag_num, def_id, aprv_user_type
-//                FROM scc_aprv_default_group
-//                WHERE ag_num = $1
-//                  AND def_id = $2`,
-//         values: [ag_num, def_id],
-//     };
-//
-//     // aprv_user_type이 0일 때 사용할 쿼리
-//     const aprvTypeQuery = {
-//         text: "SELECT du.*, u.uname FROM scc_aprv_default_user du JOIN scc_user u ON du.aprv_id = u.uid WHERE def_id = $1 AND ag_num = $2",
-//         values: [def_id, ag_num],
-//     };
-//
-//     // aprv_user_type이 1일 때 사용할 쿼리
-//     const groupTypeQuery = {
-//         text: `SELECT ug.uid as aprv_id,
-//                       udg.auth_id,
-//                       udg.ag_num,
-//                       udg.aprv_user_type,
-//                       udg.skip_query,
-//                       udg.return_ag_num,
-//                       u.uname
-//                FROM scc_user_groups ug
-//                         JOIN scc_aprv_default_group udg ON ug.gid = udg.aprv_group
-//                         JOIN scc_user u ON ug.uid = u.uid
-//                WHERE udg.def_id = $1
-//                  AND udg.ag_num = $2`,
-//         values: [def_id, ag_num],
-//     };
-//
-//     const aprvLineTypeSqlQuery = {
-//         text: `SELECT udg.auth_id,
-//                       udg.ag_num,
-//                       udg.aprv_user_type,
-//                       udg.skip_query,
-//                       udg.return_ag_num,
-//                       udg.aprv_user_query
-//                FROM scc_aprv_default_group udg
-//                WHERE udg.def_id = $1
-//                  AND udg.ag_num = $2`,
-//         values: [def_id, ag_num] // 첫 번째 쿼리 결과에서 얻은 def_id 값을 사용
-//     };
-//
-//
-//     postgresql.query(queryTypeQuery, (typeErr, typeData) => {
-//         if (typeErr) {
-//             return res.status(500).json({message: 'Error fetching aprv_user_type'});
-//         }
-//
-//         if (typeData.rows.length === 0) {
-//             return res.status(404).json({message: 'No matching group found'});
-//         }
-//
-//         const {aprv_user_type} = typeData.rows[0];
-//
-//         if (aprv_user_type === 0) {
-//             // aprv_user_type이 0일 때 aprvTypeQuery 실행
-//             postgresql.query(aprvTypeQuery, (err, aprvTypeData) => {
-//                 if (err) {
-//                     return res.status(500).json({message: 'Error checking user by seq'});
-//                 }
-//
-//                 // aprvTypeData.rows가 있을 경우 정렬 후 결과 할당
-//                 const aprvTypeNextAprv = aprvTypeData.rows.length > 0
-//                     ? aprvTypeData.rows.sort((a, b) => b.default_check - a.default_check)
-//                     : [];
-//
-//                 return res.status(200).json({res: aprvTypeNextAprv});
-//             });
-//         } else if (aprv_user_type === 1) {
-//             // aprv_user_type이 1일 때 groupTypeQuery 실행
-//             postgresql.query(groupTypeQuery, (groupErr, groupTypeData) => {
-//                 if (groupErr) {
-//                     return res.status(500).json({message: 'Error checking group by seq'});
-//                 }
-//
-//                 const groupTypeNextAprv = groupTypeData.rows.length > 0 ? groupTypeData.rows : [];
-//                 return res.status(200).json({res: groupTypeNextAprv});
-//             });
-//         } else if (aprv_user_type === 2) {
-//             // aprv_user_type이 2일 때 sqlTypeQuery 실행
-//             const aprvLineTypeSqlQueryData = postgresql.query(aprvLineTypeSqlQuery);
-//             console.log(aprvLineTypeSqlQueryData)
-//             const selectedSqlQuery = {
-//                 text: `${aprvLineTypeSqlQueryData.rows[0].aprv_user_query}`
-//             }
-//             // 선택된 쿼리가 잘못된 경우, 클라이언트에서 에러 얼럿 띄워주기
-//             const selectedSqlQueryData = postgresql.query(selectedSqlQuery);
-//
-//             function convertUidToAprvId(array) {
-//                 return array.map(item => {
-//                     const {uid, ...rest} = item;
-//                     return {aprv_id: uid, ...rest};
-//                 });
-//             }
-//
-//             const result = convertUidToAprvId(selectedSqlQueryData.rows);
-//             return res.status(200).json({res: result});
-//         } else {
-//             return res.status(400).json({message: 'Invalid aprv_user_type'});
-//         }
-//     });
-// });
 app.post('/test/checkUserByAgNum', async (req, res) => {
     const { def_id, ag_num } = req.body;
 
@@ -708,143 +701,135 @@ app.post('/test/checkUserByAgNum', async (req, res) => {
 app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
     const uid = req.params.uid;
 
-    const aprvLineSelectQuery = {
-        text: `
-            SELECT *
-            FROM scc_aprv_default
-            WHERE range_group in (SELECT gid
-                                  FROM scc_user_groups
-                                  WHERE uid = $1)
-            ORDER BY def_id DESC LIMIT 1
-        `,
-        values: [uid],
-    };
-
-    const AllAprvLineSelectQuery = {
-        text: `
-            SELECT *
-            FROM scc_aprv_default
-            WHERE range_group = -1
-        `,
+    const queries = {
+        aprvLineSelect: {
+            text: `
+                SELECT * 
+                FROM scc_aprv_default 
+                WHERE range_group IN (
+                    SELECT gid 
+                    FROM scc_user_groups 
+                    WHERE uid = $1
+                ) 
+                ORDER BY def_id DESC LIMIT 1
+            `,
+            values: [uid],
+        },
+        allAprvLineSelect: {
+            text: `
+                SELECT * 
+                FROM scc_aprv_default 
+                WHERE range_group = -1
+            `,
+        },
+        aprvLineTypeAprv: (defId) => ({
+            text: `
+                SELECT 
+                    u.aprv_id, u.ag_num, u.default_check, 
+                    g.group_name, g.aprv_user_type, g.auth_id, g.skip_query, g.return_ag_num, 
+                    su.uname 
+                FROM 
+                    scc_aprv_default_user u 
+                JOIN 
+                    scc_aprv_default_group g ON u.ag_num = g.ag_num 
+                JOIN 
+                    scc_user su ON u.aprv_id = su.uid 
+                WHERE 
+                    u.def_id = $1 
+                AND 
+                    u.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
+        aprvLineTypeGroup: (defId) => ({
+            text: `
+                SELECT 
+                    u.uid AS aprv_id, u.uname 
+                FROM 
+                    scc_user_groups ug 
+                JOIN 
+                    scc_aprv_default_group udg ON ug.gid = udg.aprv_group 
+                JOIN 
+                    scc_user u ON ug.uid = u.uid 
+                WHERE 
+                    udg.def_id = $1 
+                AND 
+                    udg.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
+        aprvLineTypeSql: (defId) => ({
+            text: `
+                SELECT 
+                    udg.auth_id, udg.ag_num, udg.aprv_user_type, 
+                    udg.skip_query, udg.return_ag_num, udg.aprv_user_query 
+                FROM 
+                    scc_aprv_default_group udg 
+                WHERE 
+                    udg.def_id = $1 
+                AND 
+                    udg.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
     };
 
     try {
-        // 첫 번째 쿼리 실행
-        let aprvLineData = await postgresql.query(aprvLineSelectQuery);
+        const aprvLineData = await postgresql.query(queries.aprvLineSelect);
+        const data = aprvLineData.rows.length ? aprvLineData : await postgresql.query(queries.allAprvLineSelect);
 
-        if (aprvLineData.rows.length === 0) {
-            // 두 번째 쿼리 실행 (첫 번째 쿼리에서 결과가 없을 경우)
-            aprvLineData = await postgresql.query(AllAprvLineSelectQuery);
-        }
-
-        if (aprvLineData.rows.length === 0) {
+        if (!data.rows.length) {
             return res.status(404).send("결재선이 존재하지 않습니다.");
         }
 
-        const aprvLineDefId = aprvLineData.rows[0].def_id;
+        const defId = data.rows[0].def_id;
 
-        // 첫 번째 유형 쿼리
-        const aprvLineTypeAprvQuery = {
-            text: `SELECT
-                       u.aprv_id, u.ag_num,u.default_check,
-                       g.group_name, g.aprv_user_type, g.auth_id, g.skip_query, g.return_ag_num,
-                       su.uname
-                   FROM
-                       scc_aprv_default_user u
-                           JOIN scc_aprv_default_group g ON u.ag_num = g.ag_num
-                           JOIN scc_user su ON u.aprv_id = su.uid
-                   WHERE u.def_id = $1 AND u.ag_num = (SELECT g_order.next_ag_num
-                                                       FROM scc_aprv_default_group_order g_order
-                                                       WHERE def_id = $1
-                                                         AND ag_num = 0)`,
-            values: [aprvLineDefId],
-        };
-
-        const aprvLineTypeAprvData = await postgresql.query(aprvLineTypeAprvQuery);
-
-        // 안된다
-        if (aprvLineTypeAprvData.rows.length > 0) {
-            // 첫 번째 유형 쿼리에서 결과가 있으면 이후 진행 중단
-            const sorted_aprvTypeNextAprv = aprvLineTypeAprvData.rows.length > 0
-                ? aprvLineTypeAprvData.rows.sort((a, b) => b.default_check - a.default_check)
-                : [];
-            return res.send({ aprv_data: aprvLineData.rows, approvals: sorted_aprvTypeNextAprv });
+        // Execute Type 1 Query
+        const typeAprvData = await postgresql.query(queries.aprvLineTypeAprv(defId));
+        if (typeAprvData.rows.length > 0) {
+            const sortedApprovals = typeAprvData.rows.sort((a, b) => b.default_check - a.default_check);
+            return res.send({ aprv_data: data.rows, approvals: sortedApprovals });
         }
 
-        // 두 번째 유형 쿼리
-        const aprvLineTypeSqlQuery = {
-            text: `SELECT udg.auth_id,
-                          udg.ag_num,
-                          udg.aprv_user_type,
-                          udg.skip_query,
-                          udg.return_ag_num,
-                          udg.aprv_user_query
-                   FROM scc_aprv_default_group udg
-                   WHERE udg.def_id = $1
-                     AND udg.ag_num = (SELECT g_order.next_ag_num
-                                       FROM scc_aprv_default_group_order g_order
-                                       WHERE def_id = $1
-                                         AND ag_num = 0)`,
-            values: [aprvLineDefId],
-        };
-
-        const aprvLineTypeSqlQueryData = await postgresql.query(aprvLineTypeSqlQuery);
-
-        if (aprvLineTypeSqlQueryData.rows.length > 0) {
-            // 두 번째 유형 쿼리에서 결과가 있으면 이후 진행 중단
-            return res.send({ aprv_data: aprvLineData.rows, approvals: aprvLineTypeSqlQueryData.rows });
+        // Execute Type 2 Query
+        const typeGroupData = await postgresql.query(queries.aprvLineTypeGroup(defId));
+        if (typeGroupData.rows.length > 0) {
+            return res.send({ aprv_data: data.rows, approvals: typeGroupData.rows });
         }
 
-        // 세 번째 유형 쿼리
-        const aprvLineTypeSqlGroupDataQuery = {
-            text: `
-                SELECT * FROM scc_aprv_default_group 
-                WHERE def_id = $1 AND ag_num = $2
-            `,
-            values: [aprvLineDefId, aprvLineTypeSqlQueryData.rows[0]?.ag_num],
-        };
+        // Execute Type 3 Query
+        const sqlData = await postgresql.query(queries.aprvLineTypeSql(defId));
+        if (sqlData.rows.length > 0) {
+            const { aprv_user_query, ...metaData } = sqlData.rows[0];
+            const customQuery = await postgresql.query({ text: aprv_user_query });
 
-        const aprvLineTypeSqlGroupDataQueryData = await postgresql.query(aprvLineTypeSqlGroupDataQuery);
+            const result = customQuery.rows.map(row => ({
+                ...row,
+                ...metaData,
+                aprv_id: row.uid,
+            }));
 
-        const selectedSqlQuery = {
-            text: aprvLineTypeSqlQueryData.rows[0]?.aprv_user_query,
-        };
-
-        let selectedSqlQueryData;
-        try {
-            selectedSqlQueryData = await postgresql.query(selectedSqlQuery);
-        } catch (queryError) {
-            console.error("Custom SQL Query Error:", queryError);
-            return res.status(400).send("사용자 정의 SQL 쿼리 실행 중 오류가 발생했습니다.");
+            return res.send({ aprv_data: data.rows, approvals: result });
         }
 
-        function convertUidToAprvId(array) {
-            return array.map(item => {
-                const { uid, ...rest } = item;
-                return { aprv_id: uid, ...rest };
-            });
-        }
-
-        const aprvLineTypeData = aprvLineTypeSqlGroupDataQueryData.rows[0];
-
-        const result = convertUidToAprvId(selectedSqlQueryData.rows).map(row => ({
-            ...row,
-            aprv_user_type: aprvLineTypeData.aprv_user_type,
-            auth_id: aprvLineTypeData.auth_id,
-            skip_query: aprvLineTypeData.skip_query,
-            return_ag_num: aprvLineTypeData.return_ag_num,
-        }));
-
-        res.send({
-            aprv_data: aprvLineData.rows,
-            approvals: result,
-        });
-    } catch (err) {
-        console.error(err);
-        res.status(500).send("Error occurred while fetching approval line.");
+        res.status(404).send("결재선에 대한 추가 정보가 없습니다.");
+    } catch (error) {
+        console.error(error);
+        res.status(500).send("결재선 정보를 가져오는 중 오류가 발생했습니다.");
     }
 });
-
 // 로그인된 사용자 id와 결재선 상태로 결재선 가져오는 api
 app.get('/test/aprvProcessExtractByInputAndStatus/:input_id/:status', async (req, res) => {
     const inputId = req.params.input_id;
@@ -889,7 +874,9 @@ app.get('/test/getApprovalRoute/:mis_id', async (req, res) => {
     // scc_aprv_route 테이블에서 mis_id를 조건으로 데이터를 조회하고 seq 오름차순으로 정렬하는 쿼리 작성
     const query = {
         text: `
-            SELECT *
+            SELECT distinct mis_id, activity, activity_dt, aprv_id, opinion, delegated, delegator, necessary,
+                alarm_send_result, auth_id, verify_query, aprv_user_type, aprv_user_list, aprv_user_query, skip_check,
+                skip_query, ag_num, aprv_confirm, return_ag_num, group_name
             FROM scc_aprv_route
             WHERE mis_id = $1
 --             ORDER BY seq ASC
@@ -917,20 +904,56 @@ app.get('/test/getApprovalRoute/:mis_id', async (req, res) => {
     }
 });
 
+// 특정 mis_id의 라우트 가져오는 api
+app.post('/test/getRoute', async (req, res) => {
+    const {mis_id, next_ag_num} = req.body;
+    const query = {
+        text: `
+            select *
+            from scc_aprv_route r
+            WHERE r.mis_id = $1
+              AND r.ag_num = $2 AND (r.aprv_id IS NULL OR r.aprv_id = '')
+        `,
+        values: [mis_id, next_ag_num],
+    };
+
+
+    try {
+        // 쿼리 실행
+        const data = await postgresql.query(query);
+
+        // 데이터가 없을 경우 404 응답
+        if (data.rows.length === 0) {
+            return res.send({
+                rows: []
+            });
+        }
+
+        // 조회된 데이터를 클라이언트에게 반환
+        res.send({
+            res: data.rows
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Error occurred while fetching approval route.");
+    }
+});
+
 // 특정 aprv_id, mis_id의 라우트 가져오는 api
 app.post('/test/getApprovalByAprvIdAndMisId', async (req, res) => {
     const {user_id, mis_id} = req.body;
-
     const query = {
         text: `
             select *
             from scc_aprv_route r
             WHERE r.aprv_id = $1
               AND r.mis_id = $2
-              AND r.activity IN (1, 2);
+--               AND r.activity IN (1, 2, 3);
+-- 분기 보류
         `,
         values: [user_id, mis_id],
-    };
+    }; // 라우트와 그룹 조인하여 이름 보여준다.
 
     try {
         const data = await postgresql.query(query);
@@ -1150,16 +1173,14 @@ app.post('/test/updateCurrentUserRoute',async (req, res)=>{
 // 다음 route 결재 진행
 app.post('/test/updateNextUserRoute',async (req, res)=>{
 
-    const {mis_id,  next_approval_id, next_ag_num} = req.body; // 요청 본문에서 필요한 값들 추출
+    const {  next_approval_id,mis_id, next_ag_num} = req.body; // 요청 본문에서 필요한 값들 추출
 
 
-    // SQL 쿼리 4: 다음 라우트를 업데이트하는 쿼리. where에 별도의 조건이 필요하다. 결재자 타입과 그룹타입 모두 라우트의 고유한 키를
     const updateNextRouteQuery = `
         UPDATE scc_aprv_route
         SET activity = 1,
             aprv_id  = $1
-        WHERE mis_id = $2
-          AND ag_num = $3 RETURNING *;
+        WHERE mis_id = $2 AND ag_num = $3   RETURNING *;
     `;
 
     try {
@@ -1184,11 +1205,11 @@ app.post('/test/updateNextUserRoute',async (req, res)=>{
 // 동일한 next_ag_num이고 activity가 2(결재 대기)인 현 route를 제외한 다른 route 찾는 api
 app.post('/test/getSameNextAgNumRoute',async (req, res)=>{
     const {mis_id, ag_num, next_ag_num} = req.body; // 요청 본문에서 필요한 값들 추출
-    console.log(req.body)
+    // console.log(req.body)
     const getSameNextAgNumRouteQuery = `
         select * from  scc_aprv_route
         WHERE mis_id = $1 AND ag_num != $2
-          AND next_ag_num = $3 AND activity IN (2, 4);
+          AND next_ag_num = $3 AND activity = 1;
     `;
     try {
         await postgresql.query('BEGIN');
@@ -1214,7 +1235,6 @@ app.post('/test/getSameNextAgNumRoute',async (req, res)=>{
             error: err.message
         });
 }})
-
 
 // route 결재 진행. 현재 미사용하나 일단 삭제 보류
 app.post('/test/updateRoute', async (req, res) => {
@@ -1279,7 +1299,7 @@ app.post('/test/updateRoute', async (req, res) => {
         WHERE mis_id = $2
     `;
 
-    // SQL 쿼리 8: 모든 route의 activity 상태 확인 후 전체 라우트 수와 결재 상태인 라우트 개수 반환 
+    // SQL 쿼리 8: 모든 route의 activity 상태 확인 후 전체 라우트 수와 결재 상태인 라우트 개수 반환
     const checkAllRoutesActivityQuery = `
         SELECT COUNT(*)::INTEGER as total_routes, SUM(CASE WHEN activity = 3 THEN 1 ELSE 0 END) ::INTEGER as completed_routes
         FROM scc_aprv_route
@@ -1366,6 +1386,7 @@ app.post('/test/updateRoute', async (req, res) => {
     }
 });
 
+// 사용 안하게 된 api
 app.post('/test/getGroupByDefIdAndAgNum', async (req, res) => {
     const { def_id, ag_num } = req.body;
 
