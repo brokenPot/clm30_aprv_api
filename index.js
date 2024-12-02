@@ -69,23 +69,6 @@ app.post('/test/insertProcess', async (req, res) => {
                    g.def_id = g_order.def_id AND g.ag_num = g_order.ag_num
            WHERE
                g.def_id = $1
---            union all
---            select 0,
---            g.return_ag_num,
---                g.aprv_user_type,
---                g.auth_id,
---                   g.group_name,
---                g.verify_query,
---                g.skip_query,
---                g.aprv_user_query,
---                g.aprv_skip,
---                gdr.next_ag_num
---            from scc_aprv_default_group_order gdr
---            left outer join scc_aprv_default_group g
---            on g.def_id = gdr.def_id
---            and g.ag_num = gdr.next_ag_num
---            where g.def_id = $1
---            and gdr.ag_num = 0
         `,
         selectGroupOrderByDefIdAndAgNum: `
             SELECT next_ag_num
@@ -1039,136 +1022,114 @@ app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
 });
 
 // 현재 route 결재 진행
-app.post('/test/updateCurrentUserRoute',async (req, res)=>{
-    const {mis_id, ag_num, activity, user_id, opinion, next_ag_num} = req.body;
-    // SQL 쿼리 1: 현재 로그인한 사용자가 라우트 테이블에 있는지 확인하는 api
-    const findCurrentRouteQuery = `
-        SELECT *
-        FROM scc_aprv_route
-        WHERE mis_id = $1
-          AND aprv_id = $2
-          AND ag_num = $3
-    `;
+app.post('/test/updateCurrentUserRoute', async (req, res) => {
+    const { mis_id, ag_num, activity, user_id, opinion, next_ag_num, return_ag_num, aprv_id } = req.body;
 
-    // SQL 쿼리 2: 현재 라우트를 업데이트하는 쿼리 (activity, opinion, activity_dt 값 업데이트)
-    const updateCurrentRouteQuery = `
-        UPDATE scc_aprv_route
-        SET activity    = $1,
-            opinion     = $2,
-            activity_dt = CURRENT_TIMESTAMP
-        WHERE mis_id = $3
-          AND aprv_id = $4
-          AND ag_num = $5 RETURNING *;
-    `;
+    const queries = {
+        findCurrentRoute: `
+            SELECT * FROM scc_aprv_route
+            WHERE mis_id = $1 AND aprv_id = $2 AND ag_num = $3
+        `,
+        updateCurrentRoute: `
+            UPDATE scc_aprv_route
+            SET activity = $1, opinion = $2, activity_dt = CURRENT_TIMESTAMP
+            WHERE mis_id = $3 AND aprv_id = $4 AND ag_num = $5 RETURNING *;
+        `,
+        recursiveRouteInit: `
+            WITH RECURSIVE ReverseRouteUpdate AS (
+                SELECT ag_num, next_ag_num, return_ag_num
+                FROM scc_aprv_route WHERE ag_num = $1
+                UNION ALL
+                SELECT r.ag_num, r.next_ag_num, r.return_ag_num
+                FROM scc_aprv_route r
+                INNER JOIN ReverseRouteUpdate ru ON r.ag_num = ru.return_ag_num
+                WHERE ru.return_ag_num != $2
+            )
+            UPDATE scc_aprv_route
+            SET activity = CASE WHEN return_ag_num = $2 THEN 1 ELSE 2 END,
+                opinion = CASE WHEN return_ag_num = $2 THEN opinion ELSE '' END
+            WHERE ag_num IN (SELECT ag_num FROM ReverseRouteUpdate) OR ag_num = $1;
+        `,
+        insertReturnHistory: `
+            INSERT INTO scc_aprv_return_history (mis_id, ag_num, return_ag_num, aprv_id, opinion, return_cnt, return_dt)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP);
+        `,
+        updateProcessStatus: `
+            UPDATE scc_aprv_process
+            SET status = $1, status_dt = CURRENT_TIMESTAMP
+            WHERE mis_id = $2;
+        `,
+        updateCancelOpinion: `
+            UPDATE scc_aprv_process
+            SET cancel_opinion = $1 WHERE mis_id = $2;
+        `,
+        checkAllRoutesActivity: `
+            SELECT COUNT(*)::INTEGER AS total_routes,
+                   SUM(CASE WHEN activity = 3 THEN 1 ELSE 0 END)::INTEGER AS completed_routes
+            FROM scc_aprv_route WHERE mis_id = $1;
+        `,
+        checkActivity4Exists: `
+            SELECT COUNT(*)::INTEGER AS count
+            FROM scc_aprv_route WHERE mis_id = $1 AND activity = 4;
+        `,
+        findNextRoute: `
+            SELECT * FROM scc_aprv_route
+            WHERE mis_id = $1 AND ag_num = $2;
+        `,
+    };
 
-    // SQL 쿼리 3: 다음 라우터를 찾는 쿼리
-    const findNextRouteQuery = `
-        SELECT *
-        FROM scc_aprv_route
-        WHERE mis_id = $1
-          AND ag_num = $2
-    `;
-
-    // SQL 쿼리 5: scc_aprv_process 테이블에서 status_dt 업데이트
-    const updateProcessStatusDtQuery = `
-        UPDATE scc_aprv_process
-        SET status_dt = CURRENT_TIMESTAMP
-        WHERE mis_id = $1
-    `;
-
-    // SQL 쿼리 6: scc_aprv_process 테이블의 cancel_opinion 칼럼 업데이트
-    const updateProcessCancelOpinionQuery = `
-        UPDATE scc_aprv_process
-        SET cancel_opinion = $1
-        WHERE mis_id = $2
-    `;
-    // SQL 쿼리 7: scc_aprv_process 테이블의 status 값 업데이트
-    const updateProcessStatusValueQuery = `
-        UPDATE scc_aprv_process
-        SET status    = $1,
-            status_dt = CURRENT_TIMESTAMP
-        WHERE mis_id = $2
-    `;
-
-    // SQL 쿼리 8: 모든 route의 activity 상태 확인 후 전체 라우트 수와 결재 상태인 라우트 개수 반환
-    const checkAllRoutesActivityQuery = `
-        SELECT COUNT(*)::INTEGER as total_routes, SUM(CASE WHEN activity = 3 THEN 1 ELSE 0 END) ::INTEGER as completed_routes
-        FROM scc_aprv_route
-        WHERE mis_id = $1
-    `;
-
-    // SQL 쿼리 9: activity가 4인 row가 있는지 확인하는 쿼리
-    const checkActivity4ExistsQuery = `
-        SELECT COUNT(*) ::INTEGER as count
-        FROM scc_aprv_route
-        WHERE mis_id = $1 AND activity = 4
-    `;
-    try{
+    try {
         await postgresql.query('BEGIN');
 
-        // 현재 로그인한 사용자가 라우트 테이블에 있는지 확인
-        const currentRouteResult = await postgresql.query(findCurrentRouteQuery, [mis_id, user_id, ag_num]);
-        if (currentRouteResult.rowCount === 0) {
-            throw new Error('No matching route found for the current user.');
-        }
+        const currentRoute = await postgresql.query(queries.findCurrentRoute, [mis_id, user_id, ag_num]);
+        if (currentRoute.rowCount === 0) throw new Error('No matching route found for the current user.');
 
-        // 현재 로그인한 사용자가 결재 취소하는 경우
         if (activity === 4) {
-            // scc_aprv_route 테이블 업데이트
-            await postgresql.query(updateCurrentRouteQuery, [activity, opinion, mis_id, user_id, ag_num]);
-
-            // scc_aprv_process 테이블의 cancel_opinion에 opinion 값 저장
-            await postgresql.query(updateProcessCancelOpinionQuery, [opinion, mis_id]);
-
-            // scc_aprv_process 테이블의 status 값을 3(반려)으로 업데이트 (activity가 4인 경우)
-            await postgresql.query(updateProcessStatusValueQuery, [3, mis_id]);
+            // 취소 처리
+            await postgresql.query(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num]);
+            await postgresql.query(queries.recursiveRouteInit, [ag_num, return_ag_num]);
+            await postgresql.query(queries.updateCancelOpinion, [opinion, mis_id]);
+            await postgresql.query(queries.updateProcessStatus, [4, mis_id]);
+        } else if (activity === 5) {
+            // 반려 처리
+            await postgresql.query(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num]);
+            await postgresql.query(queries.recursiveRouteInit, [ag_num, return_ag_num]);
+            await postgresql.query(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, aprv_id, opinion, 0]);
+            await postgresql.query(queries.updateProcessStatus, [3, mis_id]);
         } else {
-            // 현재 로그인한 사용자가 결재하는 경우
-            await postgresql.query(updateCurrentRouteQuery, [activity, opinion, mis_id, user_id, ag_num]);
+            // 일반 결재 처리
+            await postgresql.query(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num]);
         }
-        // scc_aprv_process 테이블의 status_dt 업데이트
-        await postgresql.query(updateProcessStatusDtQuery, [mis_id]);
 
-        // 현재 process에 해당하는 모든 route의 상태 확인
-        const allRoutesStatus = await postgresql.query(checkAllRoutesActivityQuery, [mis_id]);
-        const {total_routes, completed_routes} = allRoutesStatus.rows[0];
+        // 상태 업데이트 및 라우터 확인
+        const allRoutesStatus = await postgresql.query(queries.checkAllRoutesActivity, [mis_id]);
+        const { total_routes, completed_routes } = allRoutesStatus.rows[0];
+        const activity4Exists = await postgresql.query(queries.checkActivity4Exists, [mis_id]);
 
-        // activity가 4인 (route가 취소인) row가 있는지 확인
-        const activity4Exists = await postgresql.query(checkActivity4ExistsQuery, [mis_id]);
-
-        const hasActivity4 = activity4Exists.rows[0].count > 0;
-
-        if (!hasActivity4 && completed_routes === 1 && activity === 3) {
-            await postgresql.query(updateProcessStatusValueQuery, [1, mis_id]);
-        } else if (completed_routes === total_routes) {
-            await postgresql.query(updateProcessStatusValueQuery, [2, mis_id]);
+        if (activity4Exists.rows[0].count === 0) {
+            if (completed_routes === 1 && activity === 3) {
+                await postgresql.query(queries.updateProcessStatus, [1, mis_id]);
+            } else if (completed_routes === total_routes) {
+                await postgresql.query(queries.updateProcessStatus, [2, mis_id]);
+            }
         }
-        const nextRouteResult = await postgresql.query(findNextRouteQuery, [mis_id, next_ag_num]);
 
-        if (nextRouteResult.rowCount === 0) {
-            // 마지막 라우터일 경우
-            await postgresql.query('COMMIT');
-            return res.status(200).json({
-                message: 'Current route updated, no next route available.',
-                isLastRoute: true // 마지막 라우터임을 표시
-            });
-        }
+        const nextRoute = await postgresql.query(queries.findNextRoute, [mis_id, next_ag_num]);
         await postgresql.query('COMMIT');
 
         res.status(200).json({
-            message: 'Current and next route successfully updated.',
-            isLastRoute: false // 마지막 라우터 아님을 표시
+            message: 'Route successfully updated.',
+            isLastRoute: nextRoute.rowCount === 0,
         });
-
-    } catch (err) {
-    await postgresql.query('ROLLBACK');
-    console.error(err.message);
-    res.status(500).json({
-        message: 'Server error while updating route data',
-        error: err.message
-    });
-}
-})
+    } catch (error) {
+        await postgresql.query('ROLLBACK');
+        console.error('Error updating route:', error.message);
+        res.status(500).json({
+            message: 'Error updating route data.',
+            error: error.message,
+        });
+    }
+});
 
 // 다음 route 결재 진행
 app.post('/test/updateNextUserRoute',async (req, res)=>{
