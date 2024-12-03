@@ -470,7 +470,9 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
         for (const node of nodes) {
             await postgresql.query(queries.updateGroupAgNum, [
                 convertAgNumKeySet[node.key],
-                convertAgNumKeySet[node.return_ag_num] || null,
+                node.return_ag_num === -1
+                    ? -1
+                    : (convertAgNumKeySet[node.return_ag_num] || null),
             ]);
         }
 
@@ -939,48 +941,6 @@ app.post('/test/getRoute', async (req, res) => {
 });
 
 // 특정 aprv_id, mis_id의 라우트 가져오는 api
-// app.post('/test/getApprovalByAprvIdAndMisId', async (req, res) => {
-//     const {user_id, mis_id} = req.body;
-//     const query = {
-//         text: `
-//             select *
-//             from scc_aprv_route r
-//             WHERE r.aprv_id = $1
-//               AND r.mis_id = $2
-// --               AND r.activity IN (1, 2, 3);
-// -- 분기 보류
-//         `,
-//         values: [user_id, mis_id],
-//     }; // 라우트와 그룹 조인하여 이름 보여준다.
-//
-//
-//
-//     try {
-//         const data = await postgresql.query(query);
-//
-//         //data에서 activity가 3번인 row의 next_ag_num을 scc_aprv_route 테이블의 다른 row의 ag_num이 갖고있고, 해당 row의 aprv_id가 ''가 아닌 경우, rows에 반환하지 않도록 해줘
-//
-//
-//         // 데이터가 없을 경우 빈 배열 반환
-//         if (data.rows.length === 0) {
-//             return res.send({
-//                 rows: []
-//             });
-//         }
-//
-//         // 쿼리 결과를 반환
-//         // 여기서 쓰는 api는 1가지 row만 가져와야한다. 현재 결재할 것. 결재를 완료하고, 다음 결재자까지 배정된 것을 가져오면 안된다.
-//         res.send({
-//             rows: data.rows
-//         });
-//
-//     } catch (err) {
-//         console.error(err);
-//         res.status(500).send("Error occurred while fetching approval process and route.");
-//     }
-// })
-
-
 app.post('/test/getApprovalByAprvIdAndMisId', async (req, res) => {
     const { user_id, mis_id } = req.body;
 
@@ -1049,7 +1009,6 @@ app.post('/test/getApprovalByAprvIdAndMisId', async (req, res) => {
         res.status(500).send("Error occurred while fetching approval process and route.");
     }
 });
-
 
 // 결재 확인 (사용자가 결재할 요청 보는 화면)
 app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
@@ -1334,8 +1293,6 @@ app.post('/test/getDirectedCurrentRouteNotAprv',async (req, res)=>{
             error: err.message
         });
     }})
-
-
 
 // route 결재 진행. 현재 미사용하나 일단 삭제 보류
 app.post('/test/updateRoute', async (req, res) => {
