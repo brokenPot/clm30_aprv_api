@@ -329,7 +329,9 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
         for (const node of nodes) {
             await postgresql.query(queries.updateGroupAgNum, [
                 convertAgNumKeySet[node.key],
-                node.return_ag_num === -1 ? -1 : convertAgNumKeySet[node.return_ag_num] || null
+                node.return_ag_num === -1
+                    ? -1
+                    : (convertAgNumKeySet[node.return_ag_num] || 0),
             ]);
         }
 
@@ -991,6 +993,7 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         });
     }
 });
+
 // 15. 사용자 sql 유효성 확인 api
 app.post('/test/checkUserQuery', async (req, res) => {
     const { query } = req.body; // 요청 본문에서 필요한 값들 추출
