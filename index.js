@@ -794,9 +794,12 @@ app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
 
 // 14. 현재 route 결재 진행
 app.post('/test/updateCurrentUserRoute', async (req, res) => {
+    // user_id -> 현재 로그인한 사용자 id
+    // next_approval_id -> 다음 결재 라우트에 할당될 사용자 id
+
     const {
         mis_id, ag_num, activity, user_id, opinion,
-        return_ag_num, aprv_id, next_approval_id, next_ag_num
+        return_ag_num, next_approval_id, next_ag_num
     } = req.body;
     const queries = {
         findCurrentRoute: `
@@ -886,7 +889,7 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         initWholeRouteActivityMinus1:`
             WITH TopParent AS (
                 SELECT ag_num
-                FROM scc_aprv_route AS parent
+                FROM  scc_aprv_route AS parent
                 WHERE parent.ag_num NOT IN (
                     SELECT child.next_ag_num
                     FROM scc_aprv_route AS child
@@ -928,16 +931,17 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
                 // 특정 return_ag_num이 정해져 있는 경우
                 await executeQuery(queries.recursiveRouteInit, [mis_id, return_ag_num]);
             }
-            await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, aprv_id, opinion, 0]);
+            await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, user_id, opinion, 0]);
             await executeQuery(queries.updateProcessStatus, [3, mis_id]);
         }
         //라우트 결재 처리
         else {
             await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            // 결재후 다음 결재 그룹에 activity 업데이트
+            await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
         }
 
-        // 결재후 다음 결재 그룹에 activity 업데이트
-        await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
+
 
         // 결재후 다음 결재 그룹에 결재자 할당
         // 두 쿼리 분리한 이유는 반려시 결재자들이 지정된 상태로 라우트가 초기화 되기때문에
