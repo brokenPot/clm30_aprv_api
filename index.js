@@ -23,7 +23,7 @@ server.listen(PORT, HOST, () => {
     postgresql.connect();
 })
 
-// 1. 결재선 전체 get api
+// 1. 결재선 전체 가져오는 api
 app.get('/test/aprvDefault', async (req, res) => {
     const query = {
         text: "SELECT * FROM scc_aprv_default",
@@ -220,113 +220,83 @@ app.post('/test/updateConfirmDate', (req, res) => {
     }
 });
 
-// 5. 결재선 추가 및 수정 시 결재선과 결재 그룹 저장 및 수정 하는 api -> 보류
+// 5. 결재선 추가 및 수정 시 결재선과 결재 그룹 저장 및 수정 하는 api
 app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
-    const {def_id} = req.params;  // URL에서 def_id 추출
-    const {line_name, range_group, gojs_data, line_depth, input_id} = req.body; // 요청 본문에서 필요한 데이터 추출
+    const { def_id } = req.params;
+    const { line_name, range_group, gojs_data, line_depth, input_id } = req.body;
 
-    // gojs_data 검증 (문자열이어야 함)
     if (typeof gojs_data !== 'string') {
-        return res.status(400).json({message: "gojs_data must be a string"});
+        return res.status(400).json({ message: "gojs_data must be a string" });
     }
 
     // gojs_data를 JSON 객체로 변환
-    let converted_gojs_data;
+    let convertedGojsData;
     try {
-        converted_gojs_data = JSON.stringify(JSON.parse(gojs_data));
+        convertedGojsData = JSON.stringify(JSON.parse(gojs_data));
     } catch (err) {
         console.error("Invalid JSON format for gojs_data", err);
-        return res.status(400).json({message: "Invalid JSON format for gojs_data"});
+        return res.status(400).json({ message: "Invalid JSON format for gojs_data" });
     }
 
-    // SQL 쿼리 정의
     const queries = {
-        insertDefault: `
-            INSERT INTO scc_aprv_default (range_group, line_name, line_depth, input_dt, gojs_data, input_id)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5) RETURNING def_id;
-        `,
-        updateDefault: `
-            UPDATE scc_aprv_default
-            SET line_name   = $2,
-                range_group = $3,
-                gojs_data   = $4,
-                line_depth  = $5,
-                update_dt   = CURRENT_TIMESTAMP
-            WHERE def_id = $1 RETURNING def_id;
-        `,
-        insertGroup: `
-            INSERT INTO scc_aprv_default_group (def_id, group_name, aprv_user_type, aprv_group, aprv_user_query,
-                                                auth_id, verify_query, aprv_skip, skip_query, return_ag_num,
-                                                verify_query_sql, aprv_verify, key, ag_num)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    nextval('seq_ag_num')) returning key, ag_num;
-        `,
-        updateGroupAgNum: `
-            UPDATE scc_aprv_default_group
-            SET key           = $1,
-                return_ag_num = $2
-            WHERE ag_num = $1;
-        `,
-        insertGroupOrder: `
-            INSERT INTO scc_aprv_default_group_order (def_id, ag_num, next_ag_num)
-            VALUES ($1, $2, $3);
-        `,
-        insertUser: `
-            INSERT INTO scc_aprv_default_user (def_id, ag_num, aprv_id, default_check)
-            VALUES ($1, $2, $3, $4) RETURNING *;
-        `,
-        selectGojsData: `
-            SELECT gojs_data
-            FROM scc_aprv_default
-            WHERE def_id = $1;
-        `,
-        updateGojsData: `
-            UPDATE scc_aprv_default
-            SET gojs_data = $2,
-                update_dt = CURRENT_TIMESTAMP
-            WHERE def_id = $1;
-        `,
+        insertDefault: `INSERT INTO scc_aprv_default (range_group, line_name, line_depth, input_dt, gojs_data, input_id)
+                        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5) RETURNING def_id;`,
+        updateDefault: `UPDATE scc_aprv_default
+                        SET line_name = $2, range_group = $3, gojs_data = $4, line_depth = $5, update_dt = CURRENT_TIMESTAMP
+                        WHERE def_id = $1 RETURNING def_id;`,
+        // deleteRelatedData: `DELETE FROM scc_aprv_default_group WHERE def_id = $1;
+        // DELETE FROM scc_aprv_default_group_order WHERE def_id = $1;
+        // DELETE FROM scc_aprv_default_user WHERE def_id = $1;`,
+        insertGroup: `INSERT INTO scc_aprv_default_group (def_id, group_name, aprv_user_type, aprv_group, aprv_user_query,
+                                                          auth_id, verify_query, aprv_skip, skip_query, return_ag_num,
+                                                          verify_query_sql, aprv_verify, key, ag_num)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, nextval('seq_ag_num')) RETURNING key, ag_num;`,
+        updateGroupAgNum: `UPDATE scc_aprv_default_group SET key = $1, return_ag_num = $2 WHERE ag_num = $1;`,
+        insertGroupOrder: `INSERT INTO scc_aprv_default_group_order (def_id, ag_num, next_ag_num) VALUES ($1, $2, $3);`,
+        insertUser: `INSERT INTO scc_aprv_default_user (def_id, ag_num, aprv_id, default_check) VALUES ($1, $2, $3, $4);`,
+        selectGojsData: `SELECT gojs_data FROM scc_aprv_default WHERE def_id = $1;`,
+        updateGojsData: `UPDATE scc_aprv_default SET gojs_data = $2, update_dt = CURRENT_TIMESTAMP WHERE def_id = $1;`,
     };
 
-    // 트랜잭션 시작
     await postgresql.query('BEGIN');
 
     try {
         let defId;
-
         // 기존 데이터 업데이트 또는 신규 데이터 삽입
         if (def_id !== '0') {
-            const updateResult = await postgresql.query(queries.updateDefault, [def_id, line_name, range_group, converted_gojs_data, line_depth]);
+            const updateResult = await postgresql.query(queries.updateDefault, [def_id, line_name, range_group, convertedGojsData, line_depth]);
             if (updateResult.rowCount === 0) {
-                await postgresql.query('ROLLBACK');
-                return res.status(404).json({message: 'No record found with the given def_id'});
+                throw new Error('No record found with the given def_id');
             }
             defId = updateResult.rows[0].def_id;
-        } else {
-            const insertResult = await postgresql.query(queries.insertDefault, [range_group, line_name, line_depth, converted_gojs_data, input_id]);
+        }
+        // 수정
+        else {
+            const insertResult = await postgresql.query(queries.insertDefault, [range_group, line_name, line_depth, convertedGojsData, input_id]);
             defId = insertResult.rows[0].def_id;
         }
 
         // 기존 그룹, 그룹 순서 및 사용자 데이터 삭제
+        // await postgresql.query(queries.deleteRelatedData, [defId]);
+        // Error during transaction error: cannot insert multiple commands into a prepared statement
         await postgresql.query('DELETE FROM scc_aprv_default_group WHERE def_id = $1', [defId]);
         await postgresql.query('DELETE FROM scc_aprv_default_group_order WHERE def_id = $1', [defId]);
         await postgresql.query('DELETE FROM scc_aprv_default_user WHERE def_id = $1', [defId]);
 
+
         const convertAgNumKeySet = {};
-        const convertedGojsDataJson = JSON.parse(converted_gojs_data);
-        function removeString(input, target) {
-            const regex = new RegExp(target, 'g'); // target 문자열을 찾기 위한 정규 표현식
-            return input.replace(regex, ''); // target 문자열을 제거하고 남은 부분을 반환
-        }
-        // 노드 및 사용자 처리
-        const nodes = convertedGojsDataJson.nodeDataArray.slice(1);
+        const parsedGojsData = JSON.parse(convertedGojsData);
+
+        // 시작 그룹(노드) 자르기
+        const nodes = parsedGojsData.nodeDataArray.slice(1);
+
         for (const node of nodes) {
-            const result = await postgresql.query(queries.insertGroup, [
+            const groupResult = await postgresql.query(queries.insertGroup, [
                 defId,
                 node.group_name,
                 node.aprv_user_type,
                 node.aprv_group,
-                removeString(node.aprv_user_query, 'select uid, uname from scc_user'),
+                node.aprv_user_query.replace(/select uid, uname from scc_user/g, ''),
                 node.auth_id,
                 node.verify_query,
                 node.aprv_skip,
@@ -334,48 +304,44 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
                 node.return_ag_num,
                 node.verify_query_sql,
                 node.aprv_verify,
-                node.key, // 현재 프론트에서 사용하는 가짜 음수 ag_num
+                node.key
             ]);
-            convertAgNumKeySet[result.rows[0].key] = result.rows[0].ag_num;
+            convertAgNumKeySet[groupResult.rows[0].key] = groupResult.rows[0].ag_num;
 
             // 결재자 정보 삽입
-            if (node.aprv_user_type === 0 && node.selectedapprovals && node.selectedapprovals.length > 0) {
+            if (node.aprv_user_type === 0 && Array.isArray(node.selectedapprovals)) {
                 for (const approval of node.selectedapprovals) {
-                    const { aprv_id, default_check} = approval;
-                    await postgresql.query(queries.insertUser, [defId, convertAgNumKeySet[node.ag_num], aprv_id, default_check]);
+                    await postgresql.query(queries.insertUser, [defId, convertAgNumKeySet[node.key], approval.aprv_id, approval.default_check]);
                 }
             }
         }
 
-        // 그룹 순서 삽입
-        // 링크는 자르면 안된다. 0번 기억해야 뭐가 제일 첫번째인지 알 수 있다.
-        for (const link of convertedGojsDataJson.linkDataArray) {
+        // 결재 그룹의 순서 테이블에 삽입
+        for (const link of parsedGojsData.linkDataArray) {
             await postgresql.query(queries.insertGroupOrder, [
                 defId,
                 convertAgNumKeySet[link.from] || link.from,
-                convertAgNumKeySet[link.to]
+                convertAgNumKeySet[link.to] || link.to
             ]);
         }
 
-        // 그룹 업데이트
+        // 결재 그룹 테이블에 삽입
         for (const node of nodes) {
             await postgresql.query(queries.updateGroupAgNum, [
                 convertAgNumKeySet[node.key],
-                node.return_ag_num === -1
-                    ? -1
-                    : (convertAgNumKeySet[node.return_ag_num] || null),
+                node.return_ag_num === -1 ? -1 : convertAgNumKeySet[node.return_ag_num] || null
             ]);
         }
 
         // gojs_data 업데이트
-        const result = await postgresql.query(queries.selectGojsData, [defId]);
-        if (result.rowCount === 0) {
+        const gojsDataResult = await postgresql.query(queries.selectGojsData, [defId]);
+        if (gojsDataResult.rowCount === 0) {
             throw new Error(`No gojs_data found for def_id ${defId}`);
         }
 
         let gojsData;
         try {
-            gojsData = result.rows[0].gojs_data;
+            gojsData = gojsDataResult.rows[0].gojs_data;
         } catch (err) {
             console.error('Invalid gojs_data format', err);
             throw new Error(`Invalid gojs_data format for def_id ${defId}`);
@@ -396,11 +362,8 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
                 ? -1
                 : (convertAgNumKeySet[node.return_ag_num] || 0),
         }));
+        await postgresql.query(queries.updateGojsData, [defId, JSON.stringify(gojsData)]);
 
-        const updatedGojsData = JSON.stringify(gojsData);
-        await postgresql.query(queries.updateGojsData, [defId, updatedGojsData]);
-
-        // 트랜잭션 커밋
         await postgresql.query('COMMIT');
 
         res.status(200).json({
@@ -408,7 +371,6 @@ app.post('/test/updateOrInsertAprv/:def_id', async (req, res) => {
             def_id: defId
         });
     } catch (err) {
-        // 에러 발생 시 롤백
         await postgresql.query('ROLLBACK');
         console.error('Error during transaction', err);
         res.status(500).json({
@@ -830,10 +792,12 @@ app.post('/test/aprvProcessExtractByAprvIdAndStatus', async (req, res) => {
     }
 });
 
-// 14. 현재 route 결재 진행  -> 보류
+// 14. 현재 route 결재 진행
 app.post('/test/updateCurrentUserRoute', async (req, res) => {
-    const { mis_id, ag_num, activity, user_id, opinion, return_ag_num, aprv_id,next_approval_id,next_ag_num } = req.body;
-
+    const {
+        mis_id, ag_num, activity, user_id, opinion,
+        return_ag_num, aprv_id, next_approval_id, next_ag_num
+    } = req.body;
     const queries = {
         findCurrentRoute: `
             SELECT * FROM scc_aprv_route
@@ -911,7 +875,12 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         `,
         updateNextRouteActivity:`
             UPDATE scc_aprv_route
-            SET activity = 1, aprv_id  = $3
+            SET activity = 1
+            WHERE mis_id = $1 AND ag_num = $2
+        `,
+        updateNextRouteAprvId:`
+            UPDATE scc_aprv_route
+            SET  aprv_id  = $3
             WHERE mis_id = $1 AND ag_num = $2
         `,
         initWholeRouteActivityMinus1:`
@@ -932,79 +901,83 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
             WHERE mis_id = $1;
         `
     };
+
+    const executeQuery = async (query, params) => {
+        try {
+            return await postgresql.query(query, params);
+        } catch (err) {
+            throw new Error(`Query failed: ${err.message}`);
+        }
+    };
+
+    const updateRouteAndProcess = async () => {
+        //라우트 취소 처리
+        if (activity === 4) {
+            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            await executeQuery(queries.updateCancelOpinion, [opinion, mis_id]);
+            await executeQuery(queries.updateProcessStatus, [4, mis_id]);
+        }
+        //라우트 반려 처리
+        else if (activity === 5) {
+            await executeQuery(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            // return_ag_num : 0인 경우 프론트에서 반려 막도록 진행
+            // return_ag_num : -1, 반려인 경우
+            if (return_ag_num === -1) {
+                await executeQuery(queries.initWholeRouteActivityMinus1, [mis_id]);
+            } else {
+                // 특정 return_ag_num이 정해져 있는 경우
+                await executeQuery(queries.recursiveRouteInit, [mis_id, return_ag_num]);
+            }
+            await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, aprv_id, opinion, 0]);
+            await executeQuery(queries.updateProcessStatus, [3, mis_id]);
+        }
+        //라우트 결재 처리
+        else {
+            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+        }
+
+        // 결재후 다음 결재 그룹에 activity 업데이트
+        await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
+
+        // 결재후 다음 결재 그룹에 결재자 할당
+        // 두 쿼리 분리한 이유는 반려시 결재자들이 지정된 상태로 라우트가 초기화 되기때문에
+        if(next_approval_id !== ''){
+            await postgresql.query(queries.updateNextRouteAprvId, [mis_id, next_ag_num, next_approval_id]);
+        }
+    };
+
+    const checkAndUpdateProcessStatus = async () => {
+        // status 업데이트 및 라우터 확인
+        const allRoutesStatus = await executeQuery(queries.checkAllRoutesActivity, [mis_id]);
+        const { total_routes, completed_routes } = allRoutesStatus.rows[0];
+        const activity4Exists = await executeQuery(queries.checkActivity4Exists, [mis_id]);
+
+        // 작동 여부 확인
+        if (activity4Exists.rows[0].count === 0) {
+            if (completed_routes === total_routes) {
+                // status 결재 완료로 업데이트
+                await executeQuery(queries.updateProcessStatus, [2, mis_id]);
+            } else if (activity === 3) {
+                // status 반려로 업데이트
+                await executeQuery(queries.updateProcessStatus, [1, mis_id]);
+            }
+        }
+    };
+
     try {
         await postgresql.query('BEGIN');
 
-        // currentRoute는 여러개 나올수 있다.
-        const currentRoute = await postgresql.query(queries.findCurrentRoute, [mis_id, user_id, ag_num]);
+        const currentRoute = await executeQuery(queries.findCurrentRoute, [mis_id, user_id, ag_num]);
 
-        if (currentRoute.rowCount === 0) throw new Error('No matching route found for the current user.');
-
-        if (activity === 4) {
-            // 취소 처리
-            await postgresql.query(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
-            await postgresql.query(queries.updateCancelOpinion, [opinion, mis_id]);
-            await postgresql.query(queries.updateProcessStatus, [4, mis_id]);
-        } else if (activity === 5) {
-            // 반려 처리
-            console.log('반려 처리')
-            await postgresql.query(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num, next_ag_num]);
-            console.log('반려 라우트 업데이트')
-            
-            // 0인 경우 프론트에서 반려 막도록 진행
-            
-            // -1, 반려인 경우
-            if(return_ag_num===-1){
-                await postgresql.query(queries.initWholeRouteActivityMinus1, [mis_id]);
-            }else{ // 특정 return_ag_num이 정해져 있는 경우
-                await postgresql.query(queries.recursiveRouteInit, [mis_id, return_ag_num]);
-            }
-            console.log('관련 라우트 업데이트')
-            await postgresql.query(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, aprv_id, opinion, 0]);
-            await postgresql.query(queries.updateProcessStatus, [3, mis_id]);
-        } else {
-            // 일반 결재 처리
-            await postgresql.query(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+        if (currentRoute.rowCount === 0) {
+            throw new Error('No matching route found for the current user.');
         }
 
-        // 상태 업데이트 및 라우터 확인
-        const allRoutesStatus = await postgresql.query(queries.checkAllRoutesActivity, [mis_id]);
-        const { total_routes, completed_routes } = allRoutesStatus.rows[0];
-        const activity4Exists = await postgresql.query(queries.checkActivity4Exists, [mis_id]);
+        await updateRouteAndProcess();
+        await checkAndUpdateProcessStatus();
 
-        // 작동 여부 확인
-        // console.log("액티비티4 없음 : ",activity4Exists.rows[0].count)
-        if (activity4Exists.rows[0].count === 0) {
-            if (completed_routes === total_routes) {
-                await postgresql.query(queries.updateProcessStatus, [2, mis_id]);
-            }
-            else if (activity === 3) {
-                await postgresql.query(queries.updateProcessStatus, [1, mis_id]);
-            }
-        }
-        // const nextRouteArr = await postgresql.query(queries.findNextRoute, [mis_id, ag_num]);
-        // 1개 이상의 배열이 나올 수 있음
-        // console.log(nextRouteArr)
-        // if (nextRouteArr.rows.length > 0) {
-        //     for (const route of nextRouteArr.rows) {
-        //         const { next_ag_num } = route;
-        //         // next_ag_num 값을 사용해 update 쿼리를 실행
-        //         await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num, next_approval_id]);
-        //     }
-        // }
-        
-        // 결재만 하는경우
-        
-        // 결재하고 다음 결재 그룹에 결재자 할당까지 하는 경우
-        if(next_approval_id !== ''){
-            await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num, next_approval_id]);
-        }
         await postgresql.query('COMMIT');
-
-        res.status(200).json({
-            message: 'Route successfully updated.',
-            // isLastRoute: nextRoute.rowCount === 0,
-        });
+        res.status(200).json({ message: 'Route successfully updated.' });
     } catch (error) {
         await postgresql.query('ROLLBACK');
         console.error('Error updating route:', error.message);
@@ -1014,7 +987,6 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         });
     }
 });
-
 // 15. 사용자 sql 유효성 확인 api
 app.post('/test/checkUserQuery', async (req, res) => {
     const { query } = req.body; // 요청 본문에서 필요한 값들 추출
