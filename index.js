@@ -803,10 +803,15 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         mis_id, ag_num, activity, user_id, opinion,
         return_ag_num, next_approval_id, next_ag_num
     } = req.body;
+
     const queries = {
         findCurrentRoute: `
             SELECT * FROM scc_aprv_route
             WHERE mis_id = $1 AND aprv_id = $2 AND ag_num = $3
+        `,
+        findReturningRoute: `
+            SELECT * FROM scc_aprv_route
+            WHERE mis_id = $1 and ag_num = $2
         `,
         updateCurrentRoute: `
             UPDATE scc_aprv_route
@@ -845,9 +850,13 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
                                WHEN BB.ag_num = $2 THEN 1
                                ELSE 2
                     END,
+                aprv_id = CASE
+                              WHEN BB.ag_num = $2 THEN AA.aprv_id
+                              ELSE NULL 
+                    END,
                 opinion = ''
                 FROM 
-    update_chain BB
+            update_chain BB
             WHERE
                 AA.mis_id = BB.mis_id
               AND AA.ag_num = BB.ag_num;
@@ -914,44 +923,6 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
             throw new Error(`Query failed: ${err.message}`);
         }
     };
-
-    const updateRouteAndProcess = async () => {
-        //라우트 취소 처리
-        if (activity === 4) {
-            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
-            await executeQuery(queries.updateCancelOpinion, [opinion, mis_id]);
-            await executeQuery(queries.updateProcessStatus, [4, mis_id]);
-        }
-        //라우트 반려 처리
-        else if (activity === 5) {
-            await executeQuery(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num, next_ag_num]);
-            // return_ag_num : 0인 경우 프론트에서 반려 막도록 진행
-            // return_ag_num : -1, 반려인 경우
-            if (return_ag_num === -1) {
-                await executeQuery(queries.initWholeRouteActivityMinus1, [mis_id]);
-            } else {
-                // 특정 return_ag_num이 정해져 있는 경우
-                await executeQuery(queries.recursiveRouteInit, [mis_id, return_ag_num]);
-            }
-            await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, user_id, opinion, 0]);
-            await executeQuery(queries.updateProcessStatus, [3, mis_id]);
-        }
-        //라우트 결재 처리
-        else {
-            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
-            // 결재후 다음 결재 그룹에 activity 업데이트
-            await postgresql.query(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
-        }
-
-
-
-        // 결재후 다음 결재 그룹에 결재자 할당
-        // 두 쿼리 분리한 이유는 반려시 결재자들이 지정된 상태로 라우트가 초기화 되기때문에
-        if(next_approval_id !== ''){
-            await postgresql.query(queries.updateNextRouteAprvId, [mis_id, next_ag_num, next_approval_id]);
-        }
-    };
-
     const checkAndUpdateProcessStatus = async () => {
         // status 업데이트 및 라우터 확인
         const allRoutesStatus = await executeQuery(queries.checkAllRoutesActivity, [mis_id]);
@@ -970,6 +941,8 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         }
     };
 
+    let responseData = { message: 'Route successfully updated.' };
+
     try {
         await postgresql.query('BEGIN');
 
@@ -979,11 +952,40 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
             throw new Error('No matching route found for the current user.');
         }
 
-        await updateRouteAndProcess();
+        // 라우트 취소 처리
+        if (activity === 4) {
+            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            await executeQuery(queries.updateCancelOpinion, [opinion, mis_id]);
+            await executeQuery(queries.updateProcessStatus, [4, mis_id]);
+
+            const dbRes = await executeQuery(queries.findReturningRoute, [mis_id, ag_num]);
+            responseData = { message: 'cancel', aprv_id: dbRes.rows[0]?.aprv_id || null };
+        }else if (activity === 5) { // 라우트 반려 처리
+            await executeQuery(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            if (return_ag_num === -1) {
+                await executeQuery(queries.initWholeRouteActivityMinus1, [mis_id]);
+            } else {
+                await executeQuery(queries.recursiveRouteInit, [mis_id, return_ag_num]);
+                const dbRes = await executeQuery(queries.findReturningRoute, [mis_id, return_ag_num]);
+                responseData = { message: 'return', aprv_id: dbRes.rows[0]?.aprv_id || null };
+            }
+            await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, user_id, opinion, 0]);
+            await executeQuery(queries.updateProcessStatus, [3, mis_id]);
+        } else { // 라우트 결재 처리
+            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            await executeQuery(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
+            const dbRes = await executeQuery(queries.findReturningRoute, [mis_id, ag_num]);
+            responseData = { message: 'aprv', aprv_id: dbRes.rows[0]?.aprv_id || null };
+        }
+
+        // 결재후 다음 결재 그룹에 결재자 할당
+        if(next_approval_id !== ''){
+            await postgresql.query(queries.updateNextRouteAprvId, [mis_id, next_ag_num, next_approval_id]);
+        }
         await checkAndUpdateProcessStatus();
 
         await postgresql.query('COMMIT');
-        res.status(200).json({ message: 'Route successfully updated.' });
+        res.status(200).json(responseData);
     } catch (error) {
         await postgresql.query('ROLLBACK');
         console.error('Error updating route:', error.message);
