@@ -16,6 +16,7 @@ app.use(cors()); // cors 미들웨어
 app.use(express.json());
 
 const HOST = '192.168.10.104'; // 로컬 IP 기본값
+// const HOST = '0.0.0.0'; // 서버 IP 기본값
 const PORT = 8081;
 
 //서버연결
@@ -26,7 +27,11 @@ server.listen(PORT, HOST, () => {
 // 1. 결재선 전체 가져오는 api
 app.get('/test/aprvDefault', async (req, res) => {
     const query = {
-        text: "SELECT * FROM scc_aprv_default",
+        text: `
+            SELECT * 
+            FROM scc_aprv_default 
+            ORDER BY update_dt DESC, input_dt DESC
+        `,
     };
 
     try {
@@ -37,6 +42,28 @@ app.get('/test/aprvDefault', async (req, res) => {
         res.status(500).send('Internal Server Error');
     }
 });
+
+app.get('/test/getAprvDefault/:def_id', async (req, res) => {
+    const { def_id } = req.params; // URL 파라미터로 def_id 받기
+    const selectDefaultQuery = {
+        text: `SELECT def_id, line_name
+               FROM scc_aprv_default
+               WHERE range_group = $1`,
+        values: [def_id], // 쿼리의 값 설정
+    };
+
+    try {
+        // DB 조회 실행
+        const { rows } = await postgresql.query(selectDefaultQuery);
+
+        // 결과 반환 (데이터가 없을 경우 빈 배열 반환)
+        res.status(200).json(rows.length > 0 ? rows : []);
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error occurred while retrieving data from the database.');
+    }
+});
+
 
 // 2. 프로세스 추가
 app.post('/test/insertProcess', async (req, res) => {
@@ -410,46 +437,243 @@ app.post('/test/checkRangeGroup', (req, res) => {
 
 // 7. 결재선 삭제
 app.delete('/test/deleteDefault/:def_id', async (req, res) => {
-    const {def_id} = req.params;
+    const { def_id } = req.params;
+
     const deleteDefaultFromDatabase = async (def_id) => {
-        // 먼저 scc_aprv_default_group 테이블에서 연결된 데이터를 삭제
-        const deleteGroupQuery = {
-            text: `DELETE
-               FROM scc_aprv_default_group
-               WHERE def_id = $1`,
-            values: [def_id],
-        };
+        try {
+            // 삭제 전에 데이터를 조회
+            const selectDefaultQuery = {
+                text: `SELECT *
+                       FROM scc_aprv_default
+                       WHERE def_id = $1`,
+                values: [def_id],
+            };
 
-        // 그 후 scc_aprv_default 테이블에서 데이터를 삭제
-        const deleteDefaultQuery = {
-            text: `DELETE
-               FROM scc_aprv_default
-               WHERE def_id = $1`,
-            values: [def_id],
-        };
+            const selectGroupQuery = {
+                text: `SELECT *
+                       FROM scc_aprv_default_group
+                       WHERE def_id = $1`,
+                values: [def_id],
+            };
 
-        return new Promise((resolve, reject) => {
-            postgresql.query(deleteGroupQuery, (err, result) => {
-                if (err) return reject(err);
+            const defaultResult = await postgresql.query(selectDefaultQuery);
+            const groupResult = await postgresql.query(selectGroupQuery);
 
-                postgresql.query(deleteDefaultQuery, (err, result) => {
-                    if (err) return reject(err);
-                    resolve(result);
-                });
-            });
-        });
+            // 데이터가 없으면 종료
+            if (defaultResult.rows.length === 0 && groupResult.rows.length === 0) {
+                await postgresql.query('ROLLBACK');
+                return { success: false, data: null };
+            }
+
+            // scc_aprv_default_group 테이블에서 데이터 삭제
+            const deleteGroupQuery = {
+                text: `DELETE
+                       FROM scc_aprv_default_group
+                       WHERE def_id = $1`,
+                values: [def_id],
+            };
+            await postgresql.query(deleteGroupQuery);
+
+            // scc_aprv_default 테이블에서 데이터 삭제
+            const deleteDefaultQuery = {
+                text: `DELETE
+                       FROM scc_aprv_default
+                       WHERE def_id = $1`,
+                values: [def_id],
+            };
+            await postgresql.query(deleteDefaultQuery);
+
+            await postgresql.query('COMMIT');
+
+            return {
+                success: true,
+                data: {
+                    deletedDefaults: defaultResult,
+                    deletedGroups: groupResult.rows,
+                },
+            };
+        } catch (err) {
+            await postgresql.query('ROLLBACK');
+            throw err;
+        }
     };
+
     try {
         const result = await deleteDefaultFromDatabase(def_id);
-        if (result.rowCount === 0) {
+
+        if (!result.success) {
             return res.status(404).send('No record found with the given def_id.');
         }
-        res.status(200).send({message: 'Data deleted successfully.'});
+
+        res.status(200).send({
+            message: 'Data deleted successfully.',
+            deletedData: result.data.deletedDefaults,
+        });
     } catch (error) {
         console.error(error);
         res.status(500).send('Error occurred while deleting from the database.');
     }
 });
+
+// 로그인한 사용자가 속한 그룹들 불러오기
+app.get('/test/getGroupsByLoginUser/:uid', async (req, res) => {
+    const { uid } = req.params;
+
+    // SQL 쿼리 작성
+    const query = {
+        text: `
+            SELECT sug.gid, sg.gname
+            FROM scc_user_groups sug
+            JOIN scc_group sg ON sug.gid = sg.gid
+            WHERE uid = $1
+        `,
+        values: [uid], // SQL 인젝션 방지를 위해 매핑
+    };
+
+    try {
+        // 데이터베이스 쿼리 실행
+        const { rows } = await postgresql.query(query);
+
+        // 결과 반환 (데이터가 없을 경우 빈 배열 반환)
+        res.status(200).json(rows.length > 0 ? rows : []);
+    } catch (error) {
+        // 에러 처리
+        console.error('Error fetching group data:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.get('/test/getAprvDefaultByGid/:gid', async (req, res) => {
+    const { gid } = req.params;
+
+    // SQL 쿼리 작성
+    const query = {
+        text: `
+            SELECT def_id, line_name
+            FROM scc_aprv_default
+            WHERE range_group =$1
+        `,
+        values: [gid], // SQL 인젝션 방지를 위해 매핑
+    };
+
+    try {
+        // 데이터베이스 쿼리 실행
+        const { rows } = await postgresql.query(query);
+
+        // 결과 반환 (데이터가 없을 경우 빈 배열 반환)
+        res.status(200).json(rows.length > 0 ? rows : []);
+    } catch (error) {
+        // 에러 처리
+        console.error('Error fetching group data:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.get('/test/getApprovalsData/:defId', async (req, res) => {
+    const { defId } = req.params;
+
+    // SQL 쿼리 작성
+    const queries = {
+        aprvLineTypeAprv: (defId) => ({
+            text: `
+                SELECT 
+                    u.aprv_id, u.ag_num, u.default_check, 
+                    g.group_name, g.aprv_user_type, g.auth_id, g.skip_query, g.return_ag_num, 
+                    su.uname 
+                FROM 
+                    scc_aprv_default_user u 
+                JOIN 
+                    scc_aprv_default_group g ON u.ag_num = g.ag_num 
+                JOIN 
+                    scc_user su ON u.aprv_id = su.uid 
+                WHERE 
+                    u.def_id = $1 
+                AND 
+                    u.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
+        aprvLineTypeGroup: (defId) => ({
+            text: `
+                SELECT 
+                    u.uid AS aprv_id, u.uname 
+                FROM 
+                    scc_user_groups ug 
+                JOIN 
+                    scc_aprv_default_group udg ON ug.gid = udg.aprv_group 
+                JOIN 
+                    scc_user u ON ug.uid = u.uid 
+                WHERE 
+                    udg.def_id = $1 
+                AND 
+                    udg.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
+        aprvLineTypeSql: (defId) => ({
+            text: `
+                SELECT 
+                    udg.auth_id, udg.ag_num, udg.aprv_user_type, 
+                    udg.skip_query, udg.return_ag_num, udg.aprv_user_query 
+                FROM 
+                    scc_aprv_default_group udg 
+                WHERE 
+                    udg.def_id = $1 
+                AND 
+                    udg.ag_num = (
+                        SELECT g_order.next_ag_num 
+                        FROM scc_aprv_default_group_order g_order 
+                        WHERE def_id = $1 AND ag_num = 0
+                    )
+            `,
+            values: [defId],
+        }),
+    };
+
+    try {
+        // Execute Type 1 Query
+        const typeAprvData = await postgresql.query(queries.aprvLineTypeAprv(defId));
+        if (typeAprvData.rows.length > 0) {
+            const sortedApprovals = typeAprvData.rows.sort((a, b) => b.default_check - a.default_check);
+            return res.send(sortedApprovals );
+        }
+
+        // Execute Type 2 Query
+        const typeGroupData = await postgresql.query(queries.aprvLineTypeGroup(defId));
+        if (typeGroupData.rows.length > 0) {
+            return res.send(typeGroupData.rows );
+        }
+
+        // Execute Type 3 Query
+        const sqlData = await postgresql.query(queries.aprvLineTypeSql(defId));
+        if (sqlData.rows.length > 0) {
+            const { aprv_user_query, ...metaData } = sqlData.rows[0];
+            const customQuery = await postgresql.query({ text: aprv_user_query });
+
+            const result = customQuery.rows.map(row => ({
+                ...row,
+                ...metaData,
+                aprv_id: row.uid,
+            }));
+
+            return res.send( result );
+        }
+    } catch (error) {
+        // 에러 처리
+        console.error('Error fetching group data:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+
 
 // 8. 로그인된 사용자 id로 생성된 결재선에서 결재선 정보와 결재선 내 한 그룹의 결재자 리스트 가져오는 api
 app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
@@ -1003,7 +1227,7 @@ app.post('/test/checkUserQuery', async (req, res) => {
     try {
         // 입력된 쿼리의 유효성 검사
         if (!query || !query.trim().toLowerCase().startsWith('select')) {
-            return res.status(400).json({ message: 'Invalid query. Only SELECT statements are allowed.' });
+            return res.status(400).json({ message: 'select 문이 가장 앞에 와야합니다.' });
         }
 
         await postgresql.query('BEGIN');
@@ -1017,13 +1241,13 @@ app.post('/test/checkUserQuery', async (req, res) => {
         // Syntax error에 대한 별도 처리
         if (err.message.includes('syntax error at end of input')) {
             return res.status(400).json({
-                message: '쿼리에 문제가 있습니다.',
+                message: '쿼리 문법에 문제가 있습니다.',
                 error: err.message,
             });
         }
 
         res.status(500).json({
-            message: 'Server error while executing query',
+            message: '쿼리 실행 시 문제가 있습니다',
             error: err.message,
         });
     }
