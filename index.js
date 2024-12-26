@@ -15,8 +15,8 @@ const postgresql = new Client({
 app.use(cors()); // cors 미들웨어
 app.use(express.json());
 
-const HOST = '192.168.10.104'; // 로컬 IP 기본값
-// const HOST = '0.0.0.0'; // 서버 IP 기본값
+// const HOST = '192.168.10.104'; // 로컬 IP 기본값
+const HOST = '0.0.0.0'; // 서버 IP 기본값
 const PORT = 8081;
 
 //서버연결
@@ -543,6 +543,7 @@ app.get('/test/getGroupsByLoginUser/:uid', async (req, res) => {
     }
 });
 
+// gid를 통해 결재선 불러오기
 app.get('/test/getAprvDefaultByGid/:gid', async (req, res) => {
     const { gid } = req.params;
 
@@ -569,6 +570,7 @@ app.get('/test/getAprvDefaultByGid/:gid', async (req, res) => {
     }
 });
 
+// defId를 통해 결재선 내 결재 그룹과 결재 그룹 내 결재자 리스트 불러오기
 app.get('/test/getApprovalsData/:defId', async (req, res) => {
     const { defId } = req.params;
 
@@ -673,9 +675,7 @@ app.get('/test/getApprovalsData/:defId', async (req, res) => {
     }
 });
 
-
-
-// 8. 로그인된 사용자 id로 생성된 결재선에서 결재선 정보와 결재선 내 한 그룹의 결재자 리스트 가져오는 api
+// 8. 로그인된 사용자 id로 생성된 결재선에서 결재선 정보와 결재선 내 한 그룹의 결재자 리스트 가져오는 api (현재 미사용)
 app.get('/test/aprvDefaultExtractOneGroup/:uid', async (req, res) => {
     const uid = req.params.uid;
 
