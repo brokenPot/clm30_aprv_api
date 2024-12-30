@@ -182,7 +182,7 @@ app.post('/test/insertProcess', async (req, res) => {
     }
 });
 
-// 3. scc_user 테이블내 uid uname 해시 테이블 가져오는 api
+// 3. scc_user 테이블 내 uid uname 해시 테이블 가져오는 api
 app.get('/test/getSccUser', async (req, res) => {
     const query = {
         text: `SELECT u.uid, u.uname FROM scc_user u`
@@ -1153,13 +1153,13 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         const { total_routes, completed_routes } = allRoutesStatus.rows[0];
         const activity4Exists = await executeQuery(queries.checkActivity4Exists, [mis_id]);
 
-        // 작동 여부 확인
+
         if (activity4Exists.rows[0].count === 0) {
             if (completed_routes === total_routes) {
-                // status 결재 완료로 업데이트
+                // 결재선의 status 결재 완료로 업데이트
                 await executeQuery(queries.updateProcessStatus, [2, mis_id]);
-            } else if (activity === 3) {
-                // status 반려로 업데이트
+            } else if (activity === 'approve') {
+                // 결재선의 status 결재 진행으로 업데이트
                 await executeQuery(queries.updateProcessStatus, [1, mis_id]);
             }
         }
@@ -1177,14 +1177,14 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
         }
 
         // 라우트 취소 처리
-        if (activity === 4) {
-            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+        if (activity === 'cancel') {
+            await executeQuery(queries.updateCurrentRoute, [4, opinion, mis_id, user_id, ag_num, next_ag_num]);
             await executeQuery(queries.updateCancelOpinion, [opinion, mis_id]);
             await executeQuery(queries.updateProcessStatus, [4, mis_id]);
 
             const dbRes = await executeQuery(queries.findReturningRoute, [mis_id, ag_num]);
             responseData = { message: 'cancel', aprv_id: dbRes.rows[0]?.aprv_id || null };
-        }else if (activity === 5) { // 라우트 반려 처리
+        }else if (activity === 'return') { // 라우트에서 반려 진행
             await executeQuery(queries.updateCurrentRoute, [2, opinion, mis_id, user_id, ag_num, next_ag_num]);
             if (return_ag_num === -1) {
                 await executeQuery(queries.initWholeRouteActivityMinus1, [mis_id]);
@@ -1196,7 +1196,7 @@ app.post('/test/updateCurrentUserRoute', async (req, res) => {
             await executeQuery(queries.insertReturnHistory, [mis_id, ag_num, return_ag_num, user_id, opinion, 0]);
             await executeQuery(queries.updateProcessStatus, [3, mis_id]);
         } else { // 라우트 결재 처리
-            await executeQuery(queries.updateCurrentRoute, [activity, opinion, mis_id, user_id, ag_num, next_ag_num]);
+            await executeQuery(queries.updateCurrentRoute, [3, opinion, mis_id, user_id, ag_num, next_ag_num]);
             await executeQuery(queries.updateNextRouteActivity, [mis_id, next_ag_num]);
             const dbRes = await executeQuery(queries.findReturningRoute, [mis_id, ag_num]);
             responseData = { message: 'aprv', aprv_id: dbRes.rows[0]?.aprv_id || null };
