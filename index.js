@@ -924,7 +924,7 @@ app.post('/test/getRouteForNextAprvByMis_idAndUser_idAndAg_num', async (req, res
 
     try {
         // 첫 번째 쿼리 실행
-        const firstQuery = {
+        const nextRouteAgNumQuery = {
             text: `
                 SELECT r.next_ag_num 
                 FROM scc_aprv_route r
@@ -933,7 +933,7 @@ app.post('/test/getRouteForNextAprvByMis_idAndUser_idAndAg_num', async (req, res
             values: [mis_id, user_id, ag_num],
         };
 
-        const { rows: firstResultRows } = await postgresql.query(firstQuery);
+        const { rows: firstResultRows } = await postgresql.query(nextRouteAgNumQuery);
 
         // 데이터가 없을 경우 빈 배열 반환
         if (!firstResultRows.length) {
@@ -941,7 +941,7 @@ app.post('/test/getRouteForNextAprvByMis_idAndUser_idAndAg_num', async (req, res
         }
 
         // 두 번째 쿼리 실행
-        const secondResults = await Promise.all(
+        const getNextRouteQuery = await Promise.all(
             firstResultRows.map(({ next_ag_num }) =>
                 postgresql.query({
                     text: `
@@ -955,7 +955,7 @@ app.post('/test/getRouteForNextAprvByMis_idAndUser_idAndAg_num', async (req, res
         );
 
         // 병렬 실행 결과를 평탄화하여 하나의 배열로 반환
-        const flattenedResults = secondResults.flatMap(result => result.rows);
+        const flattenedResults = getNextRouteQuery.flatMap(result => result.rows);
 
         res.json({ rows: flattenedResults });
     } catch (error) {
