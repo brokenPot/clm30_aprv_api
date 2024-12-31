@@ -589,7 +589,7 @@ app.get('/test/getApprovalsData/:defId', async (req, res) => {
                 JOIN 
                     scc_user su ON u.aprv_id = su.uid 
                 WHERE 
-                    u.def_id = $1 
+                    u.def_id = $1 and g.aprv_user_type = 0
                 AND 
                     u.ag_num = (
                         SELECT g_order.next_ag_num 
@@ -610,7 +610,7 @@ app.get('/test/getApprovalsData/:defId', async (req, res) => {
                 JOIN 
                     scc_user u ON ug.uid = u.uid 
                 WHERE 
-                    udg.def_id = $1 
+                    udg.def_id = $1 and udg.aprv_user_type = 1
                 AND 
                     udg.ag_num = (
                         SELECT g_order.next_ag_num 
@@ -628,7 +628,7 @@ app.get('/test/getApprovalsData/:defId', async (req, res) => {
                 FROM 
                     scc_aprv_default_group udg 
                 WHERE 
-                    udg.def_id = $1 
+                    udg.def_id = $1 and udg.aprv_user_type = 2
                 AND 
                     udg.ag_num = (
                         SELECT g_order.next_ag_num 
@@ -665,7 +665,6 @@ app.get('/test/getApprovalsData/:defId', async (req, res) => {
                 ...metaData,
                 aprv_id: row.uid,
             }));
-
             return res.send( result );
         }
     } catch (error) {
